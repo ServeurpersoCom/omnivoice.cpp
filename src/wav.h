@@ -1,9 +1,9 @@
+#pragma once
 // wav.h: minimal WAV reader
 //
 // read_wav_buf: PCM16 / PCM24 / float32, classic or WAVE_FORMAT_EXTENSIBLE,
 //               mono or stereo, any rate -> interleaved [T, 2] float
 
-#pragma once
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>

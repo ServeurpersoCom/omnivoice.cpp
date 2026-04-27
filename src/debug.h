@@ -1,5 +1,4 @@
 #pragma once
-
 // debug.h : tensor dump and compare helpers for Python vs GGML validation.
 // Dumps raw f32 arrays to binary files, both backends convert to f32 before
 // dump.

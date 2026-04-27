@@ -1,3 +1,4 @@
+#pragma once
 // omnivoice-llm.h: OmniVoice TTS LLM weights and graph helpers
 //
 // Container for the OmniVoice language model: a Qwen3 backbone driving a
@@ -19,7 +20,6 @@
 //
 // MaskGIT decoding runs N stateless forwards, no KV cache.
 
-#pragma once
 #include "gguf-weights.h"
 #include "qwen3-enc.h"
 

@@ -1,9 +1,9 @@
+#pragma once
 // dac-decoder.h : DAC acoustic decoder for OmniVoice (GGML)
 // Mirrors acestep VAE structure : Snake + ConvTranspose1d (mul_mat + col2im_1d)
 // + 3 dilated residual units per block. 5 blocks upsample by 8 5 4 2 3 (= 960x).
 // Input  : latent [T_in, 256] f32  (output of fc2 fed with RVQ-decoded vectors)
 // Output : audio  [T_out, 1]  f32  with T_out = 960 * T_in
-#pragma once
 
 #include "ggml-backend.h"
 #include "ggml.h"

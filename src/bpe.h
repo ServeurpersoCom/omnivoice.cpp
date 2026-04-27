@@ -1,10 +1,10 @@
+#pragma once
 // bpe.h, Qwen3/GPT-2 byte-level BPE tokenizer (CPU-only, no dependencies)
 // Loads vocab + merges from a GGUF tokenizer payload. Handles byte-level
 // encoding, GPT-2 regex pre-tokenizer, BPE merges, and a registry of
 // verbatim special tokens (endoftext plus any caller-registered tokens
 // such as the OmniVoice style markers).
 
-#pragma once
 #include "gguf.h"
 
 #include <cassert>

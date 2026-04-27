@@ -1,3 +1,4 @@
+#pragma once
 // dac-encoder.h : DAC acoustic encoder for OmniVoice (GGML)
 //
 // Mirror of dac-decoder.h. Reuses DACSnake, DACResUnit, load helpers, graph
@@ -11,8 +12,6 @@
 //
 // Input  : audio  [T_in,  1]    f32  (24 kHz mono waveform)
 // Output : latent [T_out, 256]  f32  with T_out = T_in / 960
-
-#pragma once
 
 #include "dac-decoder.h"
 

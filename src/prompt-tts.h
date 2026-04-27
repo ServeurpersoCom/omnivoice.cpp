@@ -14,6 +14,7 @@
 // at the head and a diagonal True at the padding positions.
 
 #include "bpe.h"
+#include "lang-map.h"
 #include "omnivoice-llm.h"
 
 #include <cstdint>
@@ -239,8 +240,13 @@ static bool prompt_tts_build(PromptTTS *          out,
     if (denoise && ref_audio_tokens != NULL) {
         style_text += "<|denoise|>";
     }
-    std::string lang_str     = lang.empty() ? "None" : lang;
-    std::string instruct_str = instruct.empty() ? "None" : instruct;
+
+    // Mirror Python _resolve_language: pass-through valid ISO IDs, lowercase
+    // and look up names like "French" -> "fr". Empty result falls back to
+    // "None" so the special tokens still wrap a single placeholder token.
+    std::string lang_resolved = resolve_language(lang);
+    std::string lang_str      = lang_resolved.empty() ? "None" : lang_resolved;
+    std::string instruct_str  = instruct.empty() ? "None" : instruct;
     style_text += "<|lang_start|>" + lang_str + "<|lang_end|>";
     style_text += "<|instruct_start|>" + instruct_str + "<|instruct_end|>";
 

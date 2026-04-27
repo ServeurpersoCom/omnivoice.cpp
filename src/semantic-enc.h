@@ -1,3 +1,4 @@
+#pragma once
 // semantic-enc.h : SemanticEncoder for OmniVoice (GGML)
 //
 // Refines the per-frame HuBERT semantic features [768, T] into the same
@@ -20,8 +21,6 @@
 //
 // Input / output : [T, 768] f32 in GGML layout (T fast, 768 slow), matching
 // what dac_conv1d expects so the DAC helpers can be reused as-is.
-
-#pragma once
 
 #include "dac-decoder.h"  // for dac_conv1d, dac_load_passthrough, dac_load_bias_f32
 #include "ggml-backend.h"

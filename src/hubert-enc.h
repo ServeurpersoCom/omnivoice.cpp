@@ -1,3 +1,4 @@
+#pragma once
 // hubert-enc.h : HuBERT encoder for OmniVoice (GGML)
 //
 // HuBERT base model used as the semantic feature extractor inside the
@@ -22,8 +23,6 @@
 //
 // I/O layout : audio in is [T_audio, 1] f32 (T fast, IC=1 slow), output is
 // [T_out, 512] f32 in GGML layout matching dac_conv1d output convention.
-
-#pragma once
 
 #include "dac-decoder.h"  // dac_conv1d, dac_load_passthrough, dac_load_bias_f32
 #include "ggml-backend.h"

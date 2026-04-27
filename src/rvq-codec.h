@@ -1,3 +1,4 @@
+#pragma once
 // rvq-codec.h : Residual Vector Quantization codec (encode + decode, GGML)
 // Reads 8 codebooks of 1024 entries (codebook_dim=64, hidden=1024).
 //
@@ -7,7 +8,6 @@
 // residual loop: at each step project_in to 64-d, find the nearest codebook
 // entry by Euclidean distance, subtract the reconstructed quantized vector,
 // continue with the residual.
-#pragma once
 
 #include "ggml.h"
 #include "gguf-weights.h"

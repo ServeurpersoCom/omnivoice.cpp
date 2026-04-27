@@ -1,3 +1,4 @@
+#pragma once
 // qwen3-enc.h: Qwen3 transformer building blocks via ggml
 //
 // Generic Qwen3 backbone, configurable for any layer count, hidden size,
@@ -10,7 +11,6 @@
 //   RMSNorm -> gate/up proj -> SwiGLU -> down proj -> +residual
 // Stack final: RMSNorm
 
-#pragma once
 #include "ggml.h"
 #include "gguf-weights.h"
 
