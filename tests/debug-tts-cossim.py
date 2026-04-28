@@ -229,7 +229,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--prompt",   default="prompt.txt")
     ap.add_argument("--seed",     type=int, default=42)
-    ap.add_argument("--instruct", default="male")
+    ap.add_argument("--instruct", default="male, young adult, moderate pitch")
     ap.add_argument("--lang",     default="French")
     ap.add_argument("--duration", type=float, default=None)
     ap.add_argument("--out-cpp",  default="cpp/tts-cpp.wav")
