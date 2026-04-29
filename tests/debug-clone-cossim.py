@@ -2,9 +2,9 @@
 """Cossim debug : C++ omnivoice-tts vs Python OmniVoice on voice cloning.
 
 Inputs (relative to CWD = tests/) :
-    prompt.txt       target text fed to both pipelines
-    ref-text.txt     transcript of the cloning reference
-    ref-audio.wav    cloning reference audio, any rate, any layout
+    ../examples/prompt.txt       target text fed to both pipelines
+    ../examples/freeman.txt      transcript of the cloning reference
+    ../examples/freeman.wav      cloning reference audio, any rate, any layout
 
 Both sides run with seed=42, F32 weights, language=French, no pre or post
 process. The reference audio is resampled to 24 kHz mono inside both
@@ -368,11 +368,11 @@ def install_hooks(model, dump_dir):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--prompt",    default="prompt.txt")
-    ap.add_argument("--ref-text",  default="ref-text.txt")
-    ap.add_argument("--ref-audio", default="ref-audio.wav")
+    ap.add_argument("--prompt",    default="../examples/prompt.txt")
+    ap.add_argument("--ref-text",  default="../examples/freeman.txt")
+    ap.add_argument("--ref-audio", default="../examples/freeman.wav")
     ap.add_argument("--seed",      type=int, default=42)
-    ap.add_argument("--lang",      default="French")
+    ap.add_argument("--lang",      default="English")
     ap.add_argument("--duration",  type=float, default=None)
     ap.add_argument("--out-cpp",   default="cpp/clone-cpp.wav")
     ap.add_argument("--out-pt",    default="python/clone-python.wav")

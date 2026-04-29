@@ -2,7 +2,7 @@
 """Cossim debug : C++ omnivoice-tts vs Python OmniVoice on voice design.
 
 Inputs (relative to CWD = tests/) :
-    prompt.txt       target text fed to both pipelines
+    ../examples/prompt.txt       target text fed to both pipelines
 
 Both sides run with :
     instruct=male, language=French, seed=42, F32 weights, no pre or post
@@ -243,7 +243,7 @@ def install_hooks(model, dump_dir):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--prompt",   default="prompt.txt")
+    ap.add_argument("--prompt",   default="../examples/prompt.txt")
     ap.add_argument("--seed",     type=int, default=42)
     ap.add_argument("--instruct", default="male, young adult, moderate pitch")
     ap.add_argument("--lang",     default="French")
