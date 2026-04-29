@@ -55,7 +55,6 @@ static void print_usage(const char * prog) {
             "  --no-fa                 Disable flash attention (matches Python eager attention)\n"
             "  --clamp-fp16            Clamp hidden states to FP16 range\n"
             "  --dump <dir>            Dump intermediate tensors (f32) to <dir>\n"
-            "  --inject-codes <path>   Bypass codec encoder, load ref-audio-codes.bin from path\n"
             "  --llm-test <input.bin>  Full LLM forward, dump audio_logits\n"
             "  --maskgit-test          Greedy MaskGIT decoder, dump audio_tokens [K, T]\n"
             "                          (no codec decode, reads target text from stdin)\n",
@@ -219,7 +218,6 @@ int main(int argc, char ** argv) {
     float        chunk_threshold_sec    = 30.0f;
     const char * ref_wav_path           = NULL;
     const char * ref_text_path          = NULL;
-    const char * inject_codes_path      = NULL;
     const char * output_path            = NULL;
     bool         use_fa                 = true;
     bool         clamp_fp16             = false;
@@ -258,8 +256,6 @@ int main(int argc, char ** argv) {
             ref_wav_path = argv[++i];
         } else if (strcmp(argv[i], "--ref-text") == 0 && i + 1 < argc) {
             ref_text_path = argv[++i];
-        } else if (strcmp(argv[i], "--inject-codes") == 0 && i + 1 < argc) {
-            inject_codes_path = argv[++i];
         } else if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
             seed_arg = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--dump") == 0 && i + 1 < argc) {
@@ -423,139 +419,82 @@ int main(int argc, char ** argv) {
             int                  ref_T = 0;
             std::string          ref_text;
             float                ref_rms_for_postproc = -1.0f;
-            if (ref_wav_path || inject_codes_path) {
+            if (ref_wav_path) {
                 if (!read_text_file(ref_text_path, ref_text)) {
                     rc = 1;
                 } else {
                     // Mirror Python preprocess_prompt: append a terminal "."
-                    // (or ideographic full stop for CJK) when missing. This
-                    // happens before encoding regardless of inject vs ref-wav.
+                    // (or ideographic full stop for CJK) when missing.
                     if (preprocess_prompt) {
                         ref_text = add_punctuation(ref_text);
                     }
 
-                    if (inject_codes_path) {
-                        // Bypass : load codes from a Python save_dump file
-                        //   [i32 ndim=2][i32 K][i32 T][f32 K*T data]
-                        // Codes are stored as float32 by save_dump but represent
-                        // exact integer values, so cast back to i32 is lossless.
-                        FILE * f = fopen(inject_codes_path, "rb");
-                        if (!f) {
-                            fprintf(stderr, "[CLI] ERROR: failed to open %s\n", inject_codes_path);
-                            rc = 1;
-                        } else {
-                            int32_t ndim     = 0;
-                            int32_t K_loaded = 0, T_loaded = 0;
-                            size_t  rd = 0;
-                            rd += fread(&ndim, sizeof(int32_t), 1, f);
-                            rd += fread(&K_loaded, sizeof(int32_t), 1, f);
-                            rd += fread(&T_loaded, sizeof(int32_t), 1, f);
-                            const int K_expected = pt.lm.num_audio_codebook;
-                            if (rd != 3 || ndim != 2 || K_loaded != K_expected || T_loaded <= 0) {
-                                fprintf(stderr,
-                                        "[CLI] ERROR: bad inject-codes header ndim=%d K=%d T=%d (expected K=%d)\n",
-                                        ndim, K_loaded, T_loaded, K_expected);
-                                rc = 1;
-                            } else {
-                                size_t             n = (size_t) K_loaded * (size_t) T_loaded;
-                                std::vector<float> raw(n);
-                                size_t             got = fread(raw.data(), sizeof(float), n, f);
-                                if (got != n) {
-                                    fprintf(stderr, "[CLI] ERROR: inject-codes short read got=%zu expected=%zu\n", got,
-                                            n);
-                                    rc = 1;
-                                } else {
-                                    ref_codes.resize(n);
-                                    for (size_t i = 0; i < n; i++) {
-                                        ref_codes[i] = (int32_t) raw[i];
-                                    }
-                                    ref_T = T_loaded;
-                                    fprintf(stderr, "[TTS] Reference: injected codes from %s [K=%d, T=%d]\n",
-                                            inject_codes_path, K_loaded, T_loaded);
-                                    if (dump_dir) {
-                                        DebugDumper dbg;
-                                        debug_init(&dbg, dump_dir);
-                                        int ref_shape[2] = { K_loaded, T_loaded };
-                                        debug_dump_i32_as_f32(&dbg, "ref-audio-codes", ref_codes.data(), ref_shape, 2);
-                                    }
-                                }
-                            }
-                            fclose(f);
-                        }
+                    int     n_samples = 0;
+                    float * raw       = audio_read_mono(ref_wav_path, 24000, &n_samples);
+                    if (!raw || n_samples <= 0) {
+                        fprintf(stderr, "[CLI] ERROR: failed to load %s\n", ref_wav_path);
+                        rc = 1;
                     } else {
-                        int     n_samples = 0;
-                        float * raw       = audio_read_mono(ref_wav_path, 24000, &n_samples);
-                        if (!raw || n_samples <= 0) {
-                            fprintf(stderr, "[CLI] ERROR: failed to load %s\n", ref_wav_path);
+                        std::vector<float> ref_audio(raw, raw + n_samples);
+                        free(raw);
+
+                        // Mirror Python OmniVoice : compute ref_rms once on
+                        // the loaded waveform. Auto loudness normalisation
+                        // when ref RMS is in (0, 0.1). Scales the buffer so
+                        // the new RMS hits exactly 0.1 ; the ORIGINAL ref_rms
+                        // is what we plumb into the post-proc to rescale the
+                        // generated output back to the reference loudness.
+                        double sumsq = 0.0;
+                        for (float v : ref_audio) {
+                            sumsq += (double) v * (double) v;
+                        }
+
+                        double ref_rms       = std::sqrt(sumsq / (double) ref_audio.size());
+                        ref_rms_for_postproc = (float) ref_rms;
+
+                        if (ref_rms > 0.0 && ref_rms < 0.1) {
+                            float gain = (float) (0.1 / ref_rms);
+                            for (float & v : ref_audio) {
+                                v *= gain;
+                            }
+
+                            fprintf(stderr, "[TTS] Reference: RMS %.4f -> 0.1 gain %.4f\n", ref_rms, gain);
+                        }
+
+                        // Mirror Python preprocess_prompt: silence-trim the
+                        // reference clip with mid=200ms, lead=100ms,
+                        // trail=200ms, threshold=-50 dBFS before encoding.
+                        if (preprocess_prompt) {
+                            size_t before = ref_audio.size();
+                            remove_silence(ref_audio, 24000, 200, 100, 200, -50.0);
+                            fprintf(stderr, "[TTS] Reference: silence-trim %zu -> %zu samples\n", before,
+                                    ref_audio.size());
+                        }
+
+                        int n_in      = (int) ref_audio.size();
+                        int n_aligned = (n_in / pc.hop_length) * pc.hop_length;
+                        fprintf(stderr,
+                                "[TTS] Reference: %s, %d samples @ 24 kHz mono (%.2f s), aligned to %d (clip %d)\n",
+                                ref_wav_path, n_in, (double) n_in / 24000.0, n_aligned, n_in - n_aligned);
+
+                        ref_codes = pipeline_codec_encode(&pc, ref_audio.data(), n_aligned, dump_dir);
+                        if (ref_codes.empty()) {
+                            fprintf(stderr, "[CLI] ERROR: codec_encode failed on %s\n", ref_wav_path);
                             rc = 1;
                         } else {
-                            std::vector<float> ref_audio(raw, raw + n_samples);
-                            free(raw);
-
-                            // Mirror Python OmniVoice : compute ref_rms once on
-                            // the loaded waveform. Auto loudness normalisation
-                            // when ref RMS is in (0, 0.1). Scales the buffer so
-                            // the new RMS hits exactly 0.1 ; the ORIGINAL ref_rms
-                            // is what we plumb into the post-proc to rescale the
-                            // generated output back to the reference loudness.
-                            double sumsq = 0.0;
-                            for (float v : ref_audio) {
-                                sumsq += (double) v * (double) v;
-                            }
-
-                            double ref_rms       = std::sqrt(sumsq / (double) ref_audio.size());
-                            ref_rms_for_postproc = (float) ref_rms;
-
-                            if (ref_rms > 0.0 && ref_rms < 0.1) {
-                                float gain = (float) (0.1 / ref_rms);
-                                for (float & v : ref_audio) {
-                                    v *= gain;
-                                }
-
-                                fprintf(stderr, "[TTS] Reference: RMS %.4f -> 0.1 gain %.4f\n", ref_rms, gain);
-                            }
-
-                            // Mirror Python preprocess_prompt: silence-trim the
-                            // reference clip with mid=200ms, lead=100ms,
-                            // trail=200ms, threshold=-50 dBFS before encoding.
-                            if (preprocess_prompt) {
-                                size_t before = ref_audio.size();
-                                remove_silence(ref_audio, 24000, 200, 100, 200, -50.0);
-                                fprintf(stderr, "[TTS] Reference: silence-trim %zu -> %zu samples\n", before,
-                                        ref_audio.size());
-                            }
-
-                            int n_in      = (int) ref_audio.size();
-                            int n_aligned = (n_in / pc.hop_length) * pc.hop_length;
-                            fprintf(stderr,
-                                    "[TTS] Reference: %s, %d samples @ 24 kHz mono (%.2f s), aligned to %d (clip %d)\n",
-                                    ref_wav_path, n_in, (double) n_in / 24000.0, n_aligned, n_in - n_aligned);
-
-                            if (dump_dir) {
-                                DebugDumper dbg;
-                                debug_init(&dbg, dump_dir);
-                                debug_dump_1d(&dbg, "ref-audio-24k", ref_audio.data(), n_aligned);
-                            }
-
-                            ref_codes = pipeline_codec_encode(&pc, ref_audio.data(), n_aligned, dump_dir);
-                            if (ref_codes.empty()) {
-                                fprintf(stderr, "[CLI] ERROR: codec_encode failed on %s\n", ref_wav_path);
+                            const int K = pt.lm.num_audio_codebook;
+                            if ((int) ref_codes.size() % K != 0) {
+                                fprintf(stderr, "[CLI] ERROR: ref codes size %zu not divisible by K=%d\n",
+                                        ref_codes.size(), K);
                                 rc = 1;
                             } else {
-                                const int K = pt.lm.num_audio_codebook;
-                                if ((int) ref_codes.size() % K != 0) {
-                                    fprintf(stderr, "[CLI] ERROR: ref codes size %zu not divisible by K=%d\n",
-                                            ref_codes.size(), K);
-                                    rc = 1;
-                                } else {
-                                    ref_T = (int) ref_codes.size() / K;
-                                    fprintf(stderr, "[TTS] Reference: encoded to [K=%d, T=%d] codes\n", K, ref_T);
-                                    if (dump_dir) {
-                                        DebugDumper dbg;
-                                        debug_init(&dbg, dump_dir);
-                                        int ref_shape[2] = { K, ref_T };
-                                        debug_dump_i32_as_f32(&dbg, "ref-audio-codes", ref_codes.data(), ref_shape, 2);
-                                    }
+                                ref_T = (int) ref_codes.size() / K;
+                                fprintf(stderr, "[TTS] Reference: encoded to [K=%d, T=%d] codes\n", K, ref_T);
+                                if (dump_dir) {
+                                    DebugDumper dbg;
+                                    debug_init(&dbg, dump_dir);
+                                    int ref_shape[2] = { K, ref_T };
+                                    debug_dump_i32_as_f32(&dbg, "ref-audio-codes", ref_codes.data(), ref_shape, 2);
                                 }
                             }
                         }

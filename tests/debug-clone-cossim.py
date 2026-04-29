@@ -81,11 +81,27 @@ def cos(a, b):
     d = float(np.linalg.norm(a) * np.linalg.norm(b))
     return float(np.dot(a, b) / d) if d > 1e-10 else 0.0
 
-def install_hooks(model, dump_dir):
-    def passthrough_post(generated_audio, postprocess_output, ref_rms):
-        return generated_audio
-    model._post_process_audio = passthrough_post
+def stft_cos(a, b, win=2048, hop=512):
+    # STFT magnitude cosine. Drops phase, so a constant time shift between
+    # the two waveforms does not collapse the score. The plain cos() on
+    # raw samples falls to ~0 the moment chunks land a few samples apart.
+    a = a.astype(np.float64).ravel()
+    b = b.astype(np.float64).ravel()
+    n = min(len(a), len(b))
+    a, b = a[:n], b[:n]
+    window = np.hanning(win)
+    frames = (n - win) // hop + 1
+    if frames <= 0:
+        return 0.0
+    sa = np.zeros((frames, win // 2 + 1))
+    sb = np.zeros((frames, win // 2 + 1))
+    for i in range(frames):
+        s = i * hop
+        sa[i] = np.abs(np.fft.rfft(a[s:s + win] * window))
+        sb[i] = np.abs(np.fft.rfft(b[s:s + win] * window))
+    return cos(sa.ravel(), sb.ravel())
 
+def install_hooks(model, dump_dir):
     # Capture the raw input_ids row k=0 for cond and uncond at the first
     # forward pass. Lets a divergence in prompt construction (style, text,
     # ref_audio tokens) localize before the LM runs.
@@ -331,10 +347,10 @@ def main():
     del model
     torch.cuda.empty_cache()
 
-    # Bit exact conformance: always inject Python codes, disable FlashAttention
-    # (eager attention), and force strict F32 cuBLAS to match Python with
-    # allow_tf32=False set at the top of this file.
-    inject_path = os.path.join(DUMP_PT, "ref-audio-codes.bin")
+    # Strict F32 conformance: disable FlashAttention (eager attention) and
+    # force strict F32 cuBLAS to match the Python side with allow_tf32=False
+    # set at the top of this file. Both pipelines encode the reference audio
+    # independently so every encoder stage gets compared frontally.
     cmd = [
         BIN,
         "--model",         MODEL_LM,
@@ -347,7 +363,6 @@ def main():
         "--dump",          DUMP_CPP,
         "-o",              args.out_cpp,
         "--no-fa",
-        "--inject-codes",  inject_path,
     ]
     if args.duration:
         cmd += ["--duration", str(args.duration)]
@@ -365,13 +380,9 @@ def main():
     # Cond and uncond on the same line so a drift localizes to the originating
     # stage. PromptIDs split into zones (style, text, ref-audio, target) when
     # the lengths can be inferred from the prompt log.
-    def pair(name, optional=False):
-        pa = os.path.join(DUMP_CPP, name)
-        pb = os.path.join(DUMP_PT,  name)
-        if optional and (not os.path.exists(pa) or not os.path.exists(pb)):
-            return None, None
-        a, _ = load_dump(pa)
-        b, _ = load_dump(pb)
+    def pair(name):
+        a, _ = load_dump(os.path.join(DUMP_CPP, name))
+        b, _ = load_dump(os.path.join(DUMP_PT,  name))
         return a, b
 
     ca, cb = pair("prompt-cond-ids.bin")
@@ -405,17 +416,11 @@ def main():
             b = b[keep]
         return float(np.max(np.abs(a - b))) if a.size else 0.0
 
-    ra, rb = pair("ref-audio-16k.bin", optional=True)
-    if ra is not None:
-        print(f"[Cossim] RefAudio16k max_abs_diff: {maxabs(ra, rb):.3e} cossim: {cos(ra, rb):.6f} samples: {min(ra.size, rb.size)}")
-    else:
-        print(f"[Cossim] RefAudio16k: skipped (codec encoder bypassed via --inject-codes)")
+    ra, rb = pair("ref-audio-16k.bin")
+    print(f"[Cossim] RefAudio16k max_abs_diff: {maxabs(ra, rb):.3e} cossim: {cos(ra, rb):.6f} samples: {min(ra.size, rb.size)}")
 
-    fa, fb = pair("ref-hubert-features.bin", optional=True)
-    if fa is not None:
-        print(f"[Cossim] HuBERT-features cossim: {cos(fa, fb):.6f} max_abs_diff: {maxabs(fa, fb):.3e} shape_cpp: {fa.shape} shape_pt: {fb.shape}")
-    else:
-        print(f"[Cossim] HuBERT-features: skipped (codec encoder bypassed via --inject-codes)")
+    fa, fb = pair("ref-hubert-features.bin")
+    print(f"[Cossim] HuBERT-features cossim: {cos(fa, fb):.6f} max_abs_diff: {maxabs(fa, fb):.3e} shape_cpp: {fa.shape} shape_pt: {fb.shape}")
 
     ka, kb = pair("ref-audio-codes.bin")
     n_k = min(ka.size, kb.size)
@@ -486,7 +491,7 @@ def main():
     print(f"[Cossim] Audio: {cos(aa, ab):.6f}")
 
     n = min(audio_cpp.size, audio_pt.size)
-    print(f"[Cossim] WAV: {cos(audio_cpp[:n], audio_pt[:n]):.6f} samples: {n}")
+    print(f"[Cossim] WAV stft_cos: {stft_cos(audio_cpp[:n], audio_pt[:n]):.6f} samples: {n}")
 
 if __name__ == "__main__":
     main()

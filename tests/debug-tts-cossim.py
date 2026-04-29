@@ -81,11 +81,27 @@ def cos(a, b):
     d = float(np.linalg.norm(a) * np.linalg.norm(b))
     return float(np.dot(a, b) / d) if d > 1e-10 else 0.0
 
-def install_hooks(model, dump_dir):
-    def passthrough_post(generated_audio, postprocess_output, ref_rms):
-        return generated_audio
-    model._post_process_audio = passthrough_post
+def stft_cos(a, b, win=2048, hop=512):
+    # STFT magnitude cosine. Drops phase, so a constant time shift between
+    # the two waveforms does not collapse the score. The plain cos() on
+    # raw samples falls to ~0 the moment chunks land a few samples apart.
+    a = a.astype(np.float64).ravel()
+    b = b.astype(np.float64).ravel()
+    n = min(len(a), len(b))
+    a, b = a[:n], b[:n]
+    window = np.hanning(win)
+    frames = (n - win) // hop + 1
+    if frames <= 0:
+        return 0.0
+    sa = np.zeros((frames, win // 2 + 1))
+    sb = np.zeros((frames, win // 2 + 1))
+    for i in range(frames):
+        s = i * hop
+        sa[i] = np.abs(np.fft.rfft(a[s:s + win] * window))
+        sb[i] = np.abs(np.fft.rfft(b[s:s + win] * window))
+    return cos(sa.ravel(), sb.ravel())
 
+def install_hooks(model, dump_dir):
     # First call to _prepare_embed_inputs at step 0 returns the input embedding
     # right before layer 0 of the LLM, mirroring the C++ inputs_embeds dump.
     # Also captures the raw input_ids row k=0 for cond and uncond, so any
@@ -376,7 +392,7 @@ def main():
     print(f"[Cossim] Audio: {cos(aa, ab):.6f}")
 
     n = min(audio_cpp.size, audio_pt.size)
-    print(f"[Cossim] WAV: {cos(audio_cpp[:n], audio_pt[:n]):.6f} samples: {n}")
+    print(f"[Cossim] WAV stft_cos: {stft_cos(audio_cpp[:n], audio_pt[:n]):.6f} samples: {n}")
 
 if __name__ == "__main__":
     main()

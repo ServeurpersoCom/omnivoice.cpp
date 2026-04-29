@@ -602,9 +602,6 @@ Backend tuning
 Validation and debugging
   --dump <dir>            Dump intermediate tensors (F32) to <dir>. Used by
                           tests/debug-*-cossim.py for byte-level comparison.
-  --inject-codes <path>   Bypass the codec encoder and load reference audio
-                          codes from a binary dump. Used to isolate LLM and
-                          MaskGIT divergence from encoder differences.
   --llm-test <input.bin>  Run a single full LLM forward and dump audio_logits.
   --maskgit-test          Greedy MaskGIT decode (class_temp = 0,
                           position_temp = 0) and dump audio_tokens [K, T].
