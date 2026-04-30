@@ -5,6 +5,7 @@
 //
 //   codes [num_codebooks, T] i32  ->  audio [T * 960] f32 mono 24 kHz
 
+#include "backend.h"
 #include "dac-decoder.h"
 #include "dac-encoder.h"
 #include "ggml-backend.h"
@@ -49,8 +50,12 @@ struct PipelineCodec {
     // permutation) that don't fit the gf_load_tensor passthrough scheme.
     WeightCtx wctx;
 
-    // Backend reference (not owned by this struct)
-    ggml_backend_t backend;
+    // Backend pair (GPU + CPU fallback) and scheduler. The scheduler routes
+    // ops the GPU backend cannot run (e.g. K-quant get_rows on CUDA) to the
+    // CPU backend. Compute uses ggml_backend_sched_graph_compute.
+    BackendPair          bp;
+    ggml_backend_t       backend;
+    ggml_backend_sched_t sched;
 
     // Audio metadata read from GGUF KV
     int sample_rate;  // 24000
@@ -59,7 +64,7 @@ struct PipelineCodec {
 
 // Open the GGUF, load all weights to the backend, close the GGUF mapping.
 // Returns true on success. On failure the struct is left in a clean state.
-bool pipeline_codec_load(PipelineCodec * pc, const char * gguf_path, ggml_backend_t backend);
+bool pipeline_codec_load(PipelineCodec * pc, const char * gguf_path, BackendPair bp);
 
 // Decode RVQ codes into a mono 24 kHz waveform.
 //   codes : row-major i32, num_codebooks rows of n_frames each (T fast).

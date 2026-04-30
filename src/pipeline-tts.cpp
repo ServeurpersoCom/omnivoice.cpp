@@ -23,15 +23,11 @@
 #include <string>
 #include <vector>
 
-bool pipeline_tts_load(PipelineTTS *  pt,
-                       const char *   gguf_path,
-                       ggml_backend_t backend,
-                       bool           has_gpu,
-                       bool           use_fa,
-                       bool           clamp_fp16) {
+bool pipeline_tts_load(PipelineTTS * pt, const char * gguf_path, BackendPair bp, bool use_fa, bool clamp_fp16) {
     *pt                = {};
-    pt->backend        = backend;
-    pt->use_flash_attn = use_fa && has_gpu;
+    pt->bp             = bp;
+    pt->backend        = bp.backend;
+    pt->use_flash_attn = use_fa && bp.has_gpu;
     pt->clamp_fp16     = clamp_fp16;
 
     if (!gf_load(&pt->gguf, gguf_path)) {
@@ -48,7 +44,7 @@ bool pipeline_tts_load(PipelineTTS *  pt,
         return false;
     }
 
-    if (!wctx_alloc(&pt->wctx, backend)) {
+    if (!wctx_alloc(&pt->wctx, bp.backend)) {
         wctx_free(&pt->wctx);
         gf_close(&pt->gguf);
         return false;
@@ -56,10 +52,18 @@ bool pipeline_tts_load(PipelineTTS *  pt,
 
     gf_close(&pt->gguf);
 
+    // Scheduler : routes ops the GPU backend cannot run (e.g. K-quant
+    // get_rows on CUDA) to the CPU backend. 8192 nodes covers the full
+    // 28L Qwen3 graph with batched MaskGIT.
+    pt->sched = backend_sched_new(bp, 8192);
+
     return true;
 }
 
 void pipeline_tts_free(PipelineTTS * pt) {
+    if (pt->sched) {
+        ggml_backend_sched_free(pt->sched);
+    }
     wctx_free(&pt->wctx);
     *pt = {};
 }
@@ -210,10 +214,8 @@ std::vector<float> pipeline_tts_llm_forward(PipelineTTS *   pt,
     struct ggml_cgraph * graph = ggml_new_graph_custom(gctx, n_max_nodes, false);
     ggml_build_forward_expand(graph, logits);
 
-    ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(pt->backend));
-    if (!ggml_gallocr_alloc_graph(alloc, graph)) {
-        fprintf(stderr, "[LM-Forward] FATAL: gallocr_alloc_graph failed (K=%d S=%d)\n", K, S);
-        ggml_gallocr_free(alloc);
+    if (!ggml_backend_sched_alloc_graph(pt->sched, graph)) {
+        fprintf(stderr, "[LM-Forward] FATAL: sched_alloc_graph failed (K=%d S=%d)\n", K, S);
         ggml_free(gctx);
         return {};
     }
@@ -233,10 +235,10 @@ std::vector<float> pipeline_tts_llm_forward(PipelineTTS *   pt,
         ggml_backend_tensor_set(t_attn, attn_f16.data(), 0, (size_t) S * (size_t) S * sizeof(uint16_t));
     }
 
-    enum ggml_status st = ggml_backend_graph_compute(pt->backend, graph);
+    enum ggml_status st = ggml_backend_sched_graph_compute(pt->sched, graph);
     if (st != GGML_STATUS_SUCCESS) {
         fprintf(stderr, "[LM-Forward] FATAL: graph_compute status=%d\n", (int) st);
-        ggml_gallocr_free(alloc);
+        ggml_backend_sched_reset(pt->sched);
         ggml_free(gctx);
         return {};
     }
@@ -281,7 +283,7 @@ std::vector<float> pipeline_tts_llm_forward(PipelineTTS *   pt,
         dump_tensor_2d(hidden, dump_hidden_name);
     }
 
-    ggml_gallocr_free(alloc);
+    ggml_backend_sched_reset(pt->sched);
     ggml_free(gctx);
     return out;
 }
@@ -527,10 +529,8 @@ std::vector<float> pipeline_tts_llm_forward_batched(PipelineTTS *             pt
         ggml_build_forward_expand(graph, logits);
     }
 
-    ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(pt->backend));
-    if (!ggml_gallocr_alloc_graph(alloc, graph)) {
-        fprintf(stderr, "[LM-Forward-Batched] FATAL: gallocr_alloc_graph failed (B'=%d K=%d S=%d)\n", B_prime, K, S);
-        ggml_gallocr_free(alloc);
+    if (!ggml_backend_sched_alloc_graph(pt->sched, graph)) {
+        fprintf(stderr, "[LM-Forward-Batched] FATAL: sched_alloc_graph failed (B'=%d K=%d S=%d)\n", B_prime, K, S);
         ggml_free(gctx);
         return {};
     }
@@ -546,10 +546,10 @@ std::vector<float> pipeline_tts_llm_forward_batched(PipelineTTS *             pt
                                 (size_t) B_prime * (size_t) S * (size_t) S * sizeof(uint16_t));
     }
 
-    enum ggml_status st = ggml_backend_graph_compute(pt->backend, graph);
+    enum ggml_status st = ggml_backend_sched_graph_compute(pt->sched, graph);
     if (st != GGML_STATUS_SUCCESS) {
         fprintf(stderr, "[LM-Forward-Batched] FATAL: graph_compute status=%d\n", (int) st);
-        ggml_gallocr_free(alloc);
+        ggml_backend_sched_reset(pt->sched);
         ggml_free(gctx);
         return {};
     }
@@ -566,7 +566,7 @@ std::vector<float> pipeline_tts_llm_forward_batched(PipelineTTS *             pt
         ggml_backend_tensor_get(logits, out.data(), 0, n * sizeof(float));
     }
 
-    ggml_gallocr_free(alloc);
+    ggml_backend_sched_reset(pt->sched);
     ggml_free(gctx);
     return out;
 }

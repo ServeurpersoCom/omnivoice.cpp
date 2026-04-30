@@ -201,7 +201,7 @@ int main(int argc, char ** argv) {
     BackendPair bp = backend_init("Codec");
 
     PipelineCodec pc = {};
-    if (!pipeline_codec_load(&pc, model_path, bp.backend)) {
+    if (!pipeline_codec_load(&pc, model_path, bp)) {
         backend_release(bp.backend, bp.cpu_backend);
         return 1;
     }

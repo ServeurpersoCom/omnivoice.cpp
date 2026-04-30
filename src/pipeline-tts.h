@@ -6,6 +6,7 @@
 // layout of pipeline-codec.h: single backend, single shared WeightCtx, one
 // ggml_gallocr per graph at compute time.
 
+#include "backend.h"
 #include "ggml-backend.h"
 #include "omnivoice-llm.h"
 #include "weight-ctx.h"
@@ -28,8 +29,14 @@ struct PipelineTTS {
     // All LLM tensors share this WeightCtx, allocated once at end of load.
     WeightCtx wctx;
 
-    // Backend reference (not owned, comes from backend_init).
-    ggml_backend_t backend;
+    // Backend pair (GPU + CPU fallback) and scheduler. The scheduler routes
+    // ops to the CPU backend when the GPU does not implement them (typical
+    // case : K-quant get_rows on CUDA, asserts in the CUDA backend without
+    // a scheduler). Compute uses ggml_backend_sched_graph_compute, never
+    // ggml_backend_graph_compute directly.
+    BackendPair          bp;
+    ggml_backend_t       backend;
+    ggml_backend_sched_t sched;
 
     // Flash attention is enabled when a GPU backend is present and not
     // disabled by --no-fa. FP16 clamp is opt-in via --clamp-fp16 to avoid
@@ -40,12 +47,7 @@ struct PipelineTTS {
 
 // Load the LLM GGUF, copy all weights to the backend, close the GGUF mapping.
 // Returns true on success. Leaves the struct in a clean state on failure.
-bool pipeline_tts_load(PipelineTTS *  pt,
-                       const char *   gguf_path,
-                       ggml_backend_t backend,
-                       bool           has_gpu,
-                       bool           use_fa,
-                       bool           clamp_fp16);
+bool pipeline_tts_load(PipelineTTS * pt, const char * gguf_path, BackendPair bp, bool use_fa, bool clamp_fp16);
 
 // Release weights. Safe on a zeroed struct.
 void pipeline_tts_free(PipelineTTS * pt);

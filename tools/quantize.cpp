@@ -81,11 +81,31 @@ static bool is_important_l(const char * name) {
     return is_important_sm(name) || (strstr(name, "o_proj.weight") != nullptr);
 }
 
+// Tensors accessed via ggml_get_rows (text token embeddings, audio token
+// embeddings). These must use a type the CUDA get_rows kernel supports :
+// F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0. K-quants are NOT supported.
 static bool is_embed(const char * name) {
-    return strstr(name, "embed_tokens.weight") != nullptr;
+    return strstr(name, "embed_tokens.weight") != nullptr || strstr(name, "audio_embeddings.weight") != nullptr;
 }
 
 // Should this tensor be quantized at all?
+//
+// Single source of truth for the quantization policy. Applies to EVERY
+// variant (BF16, Q8_0, Q6_K, Q5_K_M, Q4_K_M, ...) : tensors that return
+// false here keep their source dtype (F32) regardless of the requested
+// type. Conv weights stay F32 because the load-time helper
+// gf_load_conv_f16 casts them to F16 on the backend (ARM im2col strict
+// requirement, see src/gguf-weights.h).
+//
+// Sensitive tensors that MUST stay in full precision :
+//   quantizer.quantizers.*  RVQ codebooks, project_in / project_out
+//                           nearest-neighbor lookup is sensitive to per-row
+//                           quantization noise ; even BF16 destroys the
+//                           mantissa enough to mis-select codes and break
+//                           the voice cloning pipeline.
+//   fc.weight / fc2.weight  Linear projections wrapping the RVQ stack,
+//                           same sensitivity argument.
+// Same policy as acestep.cpp keeping VAE-critical paths in full precision.
 static bool should_quantize(const char * name, int n_dims, const char * arch) {
     if (strstr(arch, "vae")) {
         return false;
@@ -103,6 +123,16 @@ static bool should_quantize(const char * name, int n_dims, const char * arch) {
         return false;
     }
     if (strstr(name, "null_condition_emb")) {
+        return false;
+    }
+    // RVQ codebooks and surrounding linear projections : nearest-neighbor
+    // lookup is sensitive to per-row quantization noise. Q8_0 / K-quants
+    // break ref audio encoding and tank voice cloning ; BF16 already loses
+    // enough mantissa to drift codes. Keep them at F32 in every variant.
+    if (strstr(name, "quantizer.quantizers")) {
+        return false;
+    }
+    if (strcmp(name, "fc.weight") == 0 || strcmp(name, "fc2.weight") == 0) {
         return false;
     }
     return true;

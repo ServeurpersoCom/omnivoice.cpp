@@ -28,9 +28,11 @@
 #include <cstdlib>
 #include <cstring>
 
-bool pipeline_codec_load(PipelineCodec * pc, const char * gguf_path, ggml_backend_t backend) {
-    *pc         = {};
-    pc->backend = backend;
+bool pipeline_codec_load(PipelineCodec * pc, const char * gguf_path, BackendPair bp) {
+    *pc                    = {};
+    pc->bp                 = bp;
+    pc->backend            = bp.backend;
+    ggml_backend_t backend = bp.backend;
 
     if (!gf_load(&pc->gguf, gguf_path)) {
         return false;
@@ -177,6 +179,11 @@ bool pipeline_codec_load(PipelineCodec * pc, const char * gguf_path, ggml_backen
 
     fprintf(stderr, "[PipelineCodec] Loaded codec: sr=%d hop=%d backend=%s\n", pc->sample_rate, pc->hop_length,
             ggml_backend_name(backend));
+    // Scheduler : routes ops the GPU backend cannot run (e.g. K-quant
+    // get_rows on CUDA) to the CPU backend. 4096 nodes covers HuBERT 12L
+    // + DAC encoder + DAC decoder graphs.
+    pc->sched = backend_sched_new(bp, 4096);
+
     return true;
 }
 
@@ -258,10 +265,9 @@ std::vector<float> pipeline_codec_decode(PipelineCodec * pc, const int32_t * cod
     ggml_build_forward_expand(graph, audio);
 
     // Allocate intermediates + input/output buffers in one shot on the backend.
-    ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(pc->backend));
-    if (!ggml_gallocr_alloc_graph(alloc, graph)) {
+    if (!ggml_backend_sched_alloc_graph(pc->sched, graph)) {
         fprintf(stderr, "[PipelineCodec] FATAL: gallocr_alloc_graph failed\n");
-        ggml_gallocr_free(alloc);
+        ggml_backend_sched_reset(pc->sched);
         ggml_free(gctx);
         return {};
     }
@@ -270,10 +276,10 @@ std::vector<float> pipeline_codec_decode(PipelineCodec * pc, const int32_t * cod
     ggml_backend_tensor_set(codes_in, codes, 0, (size_t) n_frames * num_codebooks * sizeof(int32_t));
 
     // Compute
-    enum ggml_status st = ggml_backend_graph_compute(pc->backend, graph);
+    enum ggml_status st = ggml_backend_sched_graph_compute(pc->sched, graph);
     if (st != GGML_STATUS_SUCCESS) {
         fprintf(stderr, "[PipelineCodec] FATAL: graph_compute status=%d\n", (int) st);
-        ggml_gallocr_free(alloc);
+        ggml_backend_sched_reset(pc->sched);
         ggml_free(gctx);
         return {};
     }
@@ -304,7 +310,7 @@ std::vector<float> pipeline_codec_decode(PipelineCodec * pc, const int32_t * cod
     std::vector<float> out((size_t) T_out);
     ggml_backend_tensor_get(audio, out.data(), 0, (size_t) T_out * sizeof(float));
 
-    ggml_gallocr_free(alloc);
+    ggml_backend_sched_reset(pc->sched);
     ggml_free(gctx);
     return out;
 }
@@ -478,9 +484,8 @@ std::vector<int32_t> pipeline_codec_encode(PipelineCodec * pc,
         ggml_build_forward_expand(graph, idx_per_k[k]);
     }
 
-    ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(pc->backend));
-    if (!ggml_gallocr_alloc_graph(alloc, graph)) {
-        ggml_gallocr_free(alloc);
+    if (!ggml_backend_sched_alloc_graph(pc->sched, graph)) {
+        ggml_backend_sched_reset(pc->sched);
         ggml_free(gctx);
         return {};
     }
@@ -488,9 +493,9 @@ std::vector<int32_t> pipeline_codec_encode(PipelineCodec * pc,
     ggml_backend_tensor_set(ac_t, e_acoustic.data(), 0, e_acoustic.size() * sizeof(float));
     ggml_backend_tensor_set(sem_t, e_semantic.data(), 0, e_semantic.size() * sizeof(float));
 
-    enum ggml_status st = ggml_backend_graph_compute(pc->backend, graph);
+    enum ggml_status st = ggml_backend_sched_graph_compute(pc->sched, graph);
     if (st != GGML_STATUS_SUCCESS) {
-        ggml_gallocr_free(alloc);
+        ggml_backend_sched_reset(pc->sched);
         ggml_free(gctx);
         return {};
     }
@@ -517,12 +522,15 @@ std::vector<int32_t> pipeline_codec_encode(PipelineCodec * pc,
         ggml_backend_tensor_get(idx_per_k[k], &codes[(size_t) k * (size_t) T], 0, (size_t) T * sizeof(int32_t));
     }
 
-    ggml_gallocr_free(alloc);
+    ggml_backend_sched_reset(pc->sched);
     ggml_free(gctx);
     return codes;
 }
 
 void pipeline_codec_free(PipelineCodec * pc) {
+    if (pc->sched) {
+        ggml_backend_sched_free(pc->sched);
+    }
     for (int i = 0; i < HUBERT_NUM_LAYERS; i++) {
         hubert_layer_free(&pc->hubert_layers[i]);
     }
@@ -569,18 +577,17 @@ static std::vector<float> pipeline_codec_dac_enc_test(PipelineCodec * pc, const 
     struct ggml_cgraph * graph = ggml_new_graph_custom(gctx, n_max_nodes, false);
     ggml_build_forward_expand(graph, latent);
 
-    ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(pc->backend));
-    if (!ggml_gallocr_alloc_graph(alloc, graph)) {
-        ggml_gallocr_free(alloc);
+    if (!ggml_backend_sched_alloc_graph(pc->sched, graph)) {
+        ggml_backend_sched_reset(pc->sched);
         ggml_free(gctx);
         return {};
     }
 
     ggml_backend_tensor_set(audio_in, audio_f32, 0, (size_t) n_samples * sizeof(float));
 
-    enum ggml_status st = ggml_backend_graph_compute(pc->backend, graph);
+    enum ggml_status st = ggml_backend_sched_graph_compute(pc->sched, graph);
     if (st != GGML_STATUS_SUCCESS) {
-        ggml_gallocr_free(alloc);
+        ggml_backend_sched_reset(pc->sched);
         ggml_free(gctx);
         return {};
     }
@@ -589,7 +596,7 @@ static std::vector<float> pipeline_codec_dac_enc_test(PipelineCodec * pc, const 
     std::vector<float> latent_out(n);
     ggml_backend_tensor_get(latent, latent_out.data(), 0, n * sizeof(float));
 
-    ggml_gallocr_free(alloc);
+    ggml_backend_sched_reset(pc->sched);
     ggml_free(gctx);
     return latent_out;
 }
@@ -622,18 +629,17 @@ static std::vector<float> pipeline_codec_sem_enc_test(PipelineCodec * pc, const 
     struct ggml_cgraph * graph = ggml_new_graph_custom(gctx, n_max_nodes, false);
     ggml_build_forward_expand(graph, sem_out);
 
-    ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(pc->backend));
-    if (!ggml_gallocr_alloc_graph(alloc, graph)) {
-        ggml_gallocr_free(alloc);
+    if (!ggml_backend_sched_alloc_graph(pc->sched, graph)) {
+        ggml_backend_sched_reset(pc->sched);
         ggml_free(gctx);
         return {};
     }
 
     ggml_backend_tensor_set(sem_in, features_f32, 0, (size_t) n_frames * SEM_HIDDEN * sizeof(float));
 
-    enum ggml_status st = ggml_backend_graph_compute(pc->backend, graph);
+    enum ggml_status st = ggml_backend_sched_graph_compute(pc->sched, graph);
     if (st != GGML_STATUS_SUCCESS) {
-        ggml_gallocr_free(alloc);
+        ggml_backend_sched_reset(pc->sched);
         ggml_free(gctx);
         return {};
     }
@@ -642,7 +648,7 @@ static std::vector<float> pipeline_codec_sem_enc_test(PipelineCodec * pc, const 
     std::vector<float> out(n);
     ggml_backend_tensor_get(sem_out, out.data(), 0, n * sizeof(float));
 
-    ggml_gallocr_free(alloc);
+    ggml_backend_sched_reset(pc->sched);
     ggml_free(gctx);
     return out;
 }
@@ -731,18 +737,17 @@ static std::vector<float> pipeline_codec_hubert_features_test(PipelineCodec * pc
     struct ggml_cgraph * graph = ggml_new_graph_custom(gctx, n_max_nodes, false);
     ggml_build_forward_expand(graph, features);
 
-    ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(pc->backend));
-    if (!ggml_gallocr_alloc_graph(alloc, graph)) {
-        ggml_gallocr_free(alloc);
+    if (!ggml_backend_sched_alloc_graph(pc->sched, graph)) {
+        ggml_backend_sched_reset(pc->sched);
         ggml_free(gctx);
         return {};
     }
 
     ggml_backend_tensor_set(audio, audio_f32, 0, (size_t) n_samples * sizeof(float));
 
-    enum ggml_status st = ggml_backend_graph_compute(pc->backend, graph);
+    enum ggml_status st = ggml_backend_sched_graph_compute(pc->sched, graph);
     if (st != GGML_STATUS_SUCCESS) {
-        ggml_gallocr_free(alloc);
+        ggml_backend_sched_reset(pc->sched);
         ggml_free(gctx);
         return {};
     }
@@ -776,7 +781,7 @@ static std::vector<float> pipeline_codec_hubert_features_test(PipelineCodec * pc
     std::vector<float> out(n);
     ggml_backend_tensor_get(features, out.data(), 0, n * sizeof(float));
 
-    ggml_gallocr_free(alloc);
+    ggml_backend_sched_reset(pc->sched);
     ggml_free(gctx);
     return out;
 }

@@ -317,7 +317,7 @@ int main(int argc, char ** argv) {
     BackendPair bp = backend_init("LM");
 
     PipelineTTS pt = {};
-    if (!pipeline_tts_load(&pt, model_path, bp.backend, bp.has_gpu, use_fa, clamp_fp16)) {
+    if (!pipeline_tts_load(&pt, model_path, bp, use_fa, clamp_fp16)) {
         backend_release(bp.backend, bp.cpu_backend);
         return 1;
     }
@@ -406,7 +406,7 @@ int main(int argc, char ** argv) {
             rc = 1;
         } else if (!bpe_load_omnivoice_specials(&tok, model_path)) {
             rc = 1;
-        } else if (!pipeline_codec_load(&pc, codec_path, bp.backend)) {
+        } else if (!pipeline_codec_load(&pc, codec_path, bp)) {
             rc = 1;
         } else {
             codec_loaded = true;

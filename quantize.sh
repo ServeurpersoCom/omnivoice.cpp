@@ -1,10 +1,20 @@
 #!/bin/bash
 # Derive lighter GGUFs from the F32 source-of-truth produced by convert.py.
-#   omnivoice-base-F32.gguf       -> -BF16.gguf (CUDA), -Q8_0.gguf (CPU)
-#   omnivoice-tokenizer-F32.gguf  -> -BF16.gguf only.
-# The tokenizer is never quantized to Q8_0 : the DAC decoder convolutions and
-# the RVQ codebooks are the audio output path and need full precision. Same
-# policy as acestep.cpp keeping the VAE in BF16.
+#   omnivoice-base-F32.gguf       -> BF16, Q8_0, Q4_K_M
+#   omnivoice-tokenizer-F32.gguf  -> BF16, Q8_0, Q4_K_M
+#
+# Three variants cover the useful precision range : BF16 for max precision
+# on CUDA, Q8_0 as the balanced default, Q4_K_M as the smallest variant
+# that still sounds correct. Q5_K_M / Q6_K were tested and dropped : their
+# size sits between Q4_K_M and Q8_0 with negligible perceptual gain.
+#
+# Quantization policy is centralized in tools/quantize.cpp should_quantize :
+# RVQ codebooks (quantizer.quantizers.*) and the fc / fc2 linear projections
+# wrapping them stay at F32 in every variant. Nearest-neighbor lookup is
+# sensitive to per-row quantization noise ; even BF16 mantissa truncation
+# drifts codes enough to break voice cloning. Conv weights stay at source
+# dtype and are cast to F16 at load time by gf_load_conv_f16 (ARM im2col
+# strict). Same policy as acestep.cpp keeping VAE-critical paths intact.
 
 set -eu
 
@@ -20,8 +30,8 @@ quantize() {
     fi
 }
 
-quantize models/omnivoice-base-F32.gguf BF16
-quantize models/omnivoice-base-F32.gguf Q8_0
-
-quantize models/omnivoice-tokenizer-F32.gguf BF16
-quantize models/omnivoice-tokenizer-F32.gguf Q8_0
+for src in models/omnivoice-base-F32.gguf models/omnivoice-tokenizer-F32.gguf; do
+    quantize "$src" BF16
+    quantize "$src" Q8_0
+    quantize "$src" Q4_K_M
+done
