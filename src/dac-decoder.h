@@ -25,8 +25,9 @@
 #define DAC_FINAL_CH      32
 
 // Snake activation : y = x + (1 / (alpha + 1e-9)) * sin(alpha * x)^2
-// Stored as (a = alpha, inv_b = 1 / (alpha + 1e-9)) so the runtime kernel
-// stays a single fused op : ggml_snake(x, a, inv_b).
+// Stored as (a = alpha, inv_b = 1 / (alpha + 1e-9)). Emitted as the naive
+// mul -> sin -> sqr -> mul -> add chain; the GGML backend autofuse pass
+// rewrites it into the dedicated fused snake kernel where available.
 struct DACSnake {
     struct ggml_tensor * a;      // [1, C] f32, alpha direct
     struct ggml_tensor * inv_b;  // [1, C] f32, 1 / (alpha + 1e-9)
@@ -308,9 +309,15 @@ static void dac_free(DACDecoder * d) {
     }
 }
 
-// Snake fused op : y = x + sin^2(a * x) * inv_b
+// Snake fused activation emitted as the naive mul -> sin -> sqr -> mul -> add
+// chain. The GGML backend autofuse pass detects it and dispatches the
+// dedicated snake kernel on backends that have one.
 static struct ggml_tensor * dac_snake(struct ggml_context * ctx, struct ggml_tensor * x, const DACSnake & s) {
-    return ggml_snake(ctx, x, s.a, s.inv_b);
+    struct ggml_tensor * t = ggml_mul(ctx, x, s.a);      // a * x  (broadcast over T)
+    t                      = ggml_sin(ctx, t);           // sin(a * x)
+    t                      = ggml_sqr(ctx, t);           // sin^2(a * x)
+    t                      = ggml_mul(ctx, t, s.inv_b);  // sin^2(a * x) * inv_b
+    return ggml_add(ctx, x, t);                          // x + sin^2(a * x) * inv_b
 }
 
 // Conv1d : x [T_in, IC] -> [T_out, OC] with bias
