@@ -86,20 +86,20 @@ static std::vector<int32_t> unpack_codes(const std::vector<uint8_t> & in, size_t
 static bool read_rvq(const char * path, int K, std::vector<int32_t> & codes, int * n_frames) {
     FILE * f = fopen(path, "rb");
     if (!f) {
-        fprintf(stderr, "[Codec] FATAL: cannot open %s\n", path);
+        fprintf(stderr, "[RVQ] FATAL: cannot open %s\n", path);
         return false;
     }
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
     if (sz <= 0) {
-        fprintf(stderr, "[Codec] FATAL: %s is empty\n", path);
+        fprintf(stderr, "[RVQ] FATAL: %s is empty\n", path);
         fclose(f);
         return false;
     }
     std::vector<uint8_t> buf((size_t) sz);
     if (fread(buf.data(), 1, buf.size(), f) != buf.size()) {
-        fprintf(stderr, "[Codec] FATAL: short read on %s\n", path);
+        fprintf(stderr, "[RVQ] FATAL: short read on %s\n", path);
         fclose(f);
         return false;
     }
@@ -108,7 +108,7 @@ static bool read_rvq(const char * path, int K, std::vector<int32_t> & codes, int
     const size_t total_bits = (size_t) sz * 8;
     const size_t n_codes    = total_bits / (size_t) RVQ_CODE_BITS;
     if (n_codes == 0 || (n_codes % (size_t) K) != 0) {
-        fprintf(stderr, "[Codec] FATAL: %s yields %zu codes, not a multiple of K=%d\n", path, n_codes, K);
+        fprintf(stderr, "[RVQ] FATAL: %s yields %zu codes, not a multiple of K=%d\n", path, n_codes, K);
         return false;
     }
     codes     = unpack_codes(buf, n_codes);
@@ -121,11 +121,11 @@ static bool write_rvq(const char * path, const std::vector<int32_t> & codes) {
     std::vector<uint8_t> packed = pack_codes(codes);
     FILE *               f      = fopen(path, "wb");
     if (!f) {
-        fprintf(stderr, "[Codec] FATAL: cannot open %s for write\n", path);
+        fprintf(stderr, "[RVQ] FATAL: cannot open %s for write\n", path);
         return false;
     }
     if (fwrite(packed.data(), 1, packed.size(), f) != packed.size()) {
-        fprintf(stderr, "[Codec] FATAL: short write on %s\n", path);
+        fprintf(stderr, "[RVQ] FATAL: short write on %s\n", path);
         fclose(f);
         return false;
     }
@@ -212,15 +212,15 @@ int main(int argc, char ** argv) {
         int     n_samples = 0;
         float * audio     = audio_read_mono(input_path, 24000, &n_samples);
         if (!audio || n_samples <= 0) {
-            fprintf(stderr, "[Codec] FATAL: failed to load %s\n", input_path);
+            fprintf(stderr, "[OmniVoice-Codec] FATAL: failed to load %s\n", input_path);
             rc = 1;
         } else {
-            fprintf(stderr, "[Codec] Encode: %s, %d samples @ 24 kHz mono (%.2f s)\n", input_path, n_samples,
+            fprintf(stderr, "[OmniVoice-Codec] Encode: %s, %d samples @ 24 kHz mono (%.2f s)\n", input_path, n_samples,
                     (double) n_samples / 24000.0);
             std::vector<int32_t> codes = pipeline_codec_encode(&pc, audio, n_samples);
             free(audio);
             if (codes.empty()) {
-                fprintf(stderr, "[Codec] FATAL: encode failed\n");
+                fprintf(stderr, "[OmniVoice-Codec] FATAL: encode failed\n");
                 rc = 1;
             } else if (!write_rvq(out_str.c_str(), codes)) {
                 rc = 1;
@@ -228,7 +228,8 @@ int main(int argc, char ** argv) {
                 const int    K           = pc.rvq.num_codebooks;
                 const int    T           = (int) codes.size() / K;
                 const size_t packed_size = (codes.size() * (size_t) RVQ_CODE_BITS + 7) / 8;
-                fprintf(stderr, "[Codec] Wrote %s: K=%d T=%d (%zu bytes)\n", out_str.c_str(), K, T, packed_size);
+                fprintf(stderr, "[OmniVoice-Codec] Wrote %s: K=%d T=%d (%zu bytes)\n", out_str.c_str(), K, T,
+                        packed_size);
             }
         }
     } else {
@@ -238,16 +239,16 @@ int main(int argc, char ** argv) {
         if (!read_rvq(input_path, K, codes, &T)) {
             rc = 1;
         } else {
-            fprintf(stderr, "[Codec] Decode: %s, K=%d T=%d\n", input_path, K, T);
+            fprintf(stderr, "[OmniVoice-Codec] Decode: %s, K=%d T=%d\n", input_path, K, T);
             std::vector<float> audio = pipeline_codec_decode(&pc, codes.data(), K, T);
             if (audio.empty()) {
-                fprintf(stderr, "[Codec] FATAL: decode failed\n");
+                fprintf(stderr, "[OmniVoice-Codec] FATAL: decode failed\n");
                 rc = 1;
             } else if (!audio_write_wav(out_str.c_str(), audio.data(), (int) audio.size(), pc.sample_rate, wav_fmt)) {
                 rc = 1;
             } else {
-                fprintf(stderr, "[Codec] Wrote %s: %d samples @ %d Hz, %.2f s\n", out_str.c_str(), (int) audio.size(),
-                        pc.sample_rate, (double) audio.size() / (double) pc.sample_rate);
+                fprintf(stderr, "[OmniVoice-Codec] Wrote %s: %d samples @ %d Hz, %.2f s\n", out_str.c_str(),
+                        (int) audio.size(), pc.sample_rate, (double) audio.size() / (double) pc.sample_rate);
             }
         }
     }

@@ -18,6 +18,7 @@
 struct BPETokenizer;
 struct MaskgitConfig;
 struct PipelineCodec;
+struct VoiceDesign;
 
 struct PipelineTTS {
     // Base GGUF kept open across module loads, closed on success.
@@ -189,3 +190,45 @@ std::vector<float> pipeline_tts_synthesize_long(PipelineTTS *         pt,
                                                 int                   ext_ref_T,
                                                 float                 ref_rms,
                                                 const char *          dump_dir);
+
+// Validate and normalise the raw instruct string against the voice-design
+// vocabulary. The target language is selected from the synthesis text : any
+// CJK ideograph in text -> Chinese, otherwise English. On error, prints a
+// "[TTS] ERROR: ..." line and returns false.
+bool pipeline_tts_resolve_instruct(const VoiceDesign * vd,
+                                   const std::string & text,
+                                   const std::string & raw,
+                                   std::string *       out);
+
+// Convert a duration in seconds to a frame count using the codec frame rate
+// (sample_rate / hop_length). Clamps to a minimum of 1 frame. Single source
+// of truth shared by every CLI / API entry that exposes --duration.
+int pipeline_tts_duration_sec_to_tokens(const PipelineCodec * pc, float duration_sec);
+
+// Voice cloning entry point : takes raw mono 24 kHz reference audio plus its
+// transcript, runs the full reference preprocessing chain (ref_rms /
+// auto-gain / add_punctuation / silence-trim / hop alignment / codec encode)
+// then dispatches to pipeline_tts_synthesize_long with the encoded ref tokens
+// and the original ref_rms threaded into post-proc. ref_audio_24k == NULL or
+// ref_n_samples <= 0 routes to the pure TTS path with ref_rms = -1, matching
+// the no-ref branch upstream. preprocess_prompt mirrors the Python flag :
+// when true, applies add_punctuation to ref_text and remove_silence
+// (mid=200ms, lead=100ms, trail=200ms, threshold=-50 dBFS) to the ref
+// waveform before encoding. Returns mono float PCM at the codec sample rate
+// (24 kHz), empty on failure.
+std::vector<float> pipeline_tts_synthesize_long_with_ref(PipelineTTS *         pt,
+                                                         PipelineCodec *       pc,
+                                                         const BPETokenizer *  tok,
+                                                         const std::string &   text,
+                                                         const std::string &   lang,
+                                                         const std::string &   instruct,
+                                                         int                   T_override,
+                                                         float                 chunk_duration_sec,
+                                                         float                 chunk_threshold_sec,
+                                                         bool                  denoise,
+                                                         bool                  preprocess_prompt,
+                                                         const MaskgitConfig & mg_cfg,
+                                                         const float *         ref_audio_24k,
+                                                         int                   ref_n_samples,
+                                                         const std::string &   ref_text,
+                                                         const char *          dump_dir);

@@ -18,7 +18,9 @@
 #include "pipeline-codec.h"
 #include "prompt-tts.h"
 #include "text-chunker.h"
+#include "voice-design.h"
 
+#include <cmath>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -29,6 +31,16 @@ bool pipeline_tts_load(PipelineTTS * pt, const char * gguf_path, BackendPair bp,
     pt->backend        = bp.backend;
     pt->use_flash_attn = use_fa && bp.has_gpu;
     pt->clamp_fp16     = clamp_fp16;
+
+    // Echo effective flags. Flash attention only activates on a GPU backend,
+    // so the disabled log fires both for explicit --no-fa and for CPU only
+    // runs where the request cannot be honoured.
+    if (!pt->use_flash_attn) {
+        fprintf(stderr, "[Load] Flash attention disabled\n");
+    }
+    if (pt->clamp_fp16) {
+        fprintf(stderr, "[Load] FP16 clamp enabled\n");
+    }
 
     if (!gf_load(&pt->gguf, gguf_path)) {
         return false;
@@ -864,4 +876,129 @@ std::vector<float> pipeline_tts_synthesize_long(PipelineTTS *         pt,
             (float) audio.size() / (float) sr, sr, ref_rms);
 
     return audio;
+}
+
+// Validate and normalise the raw instruct string against the voice-design
+// vocabulary. Picks the target language from the synthesis text : any CJK
+// ideograph -> Chinese, otherwise English.
+bool pipeline_tts_resolve_instruct(const VoiceDesign * vd,
+                                   const std::string & text,
+                                   const std::string & raw,
+                                   std::string *       out) {
+    bool        use_zh = voice_design_has_cjk(text);
+    std::string err;
+    if (!voice_design_normalize(vd, raw, use_zh, out, &err)) {
+        fprintf(stderr, "[TTS] ERROR: %s\n", err.c_str());
+        return false;
+    }
+    return true;
+}
+
+// Convert a duration in seconds to a frame count using the codec frame rate
+// (sample_rate / hop_length). Clamps to a minimum of 1 frame.
+int pipeline_tts_duration_sec_to_tokens(const PipelineCodec * pc, float duration_sec) {
+    float frame_rate = (float) pc->sample_rate / (float) pc->hop_length;
+    int   T          = (int) (duration_sec * frame_rate);
+    if (T < 1) {
+        T = 1;
+    }
+    return T;
+}
+
+std::vector<float> pipeline_tts_synthesize_long_with_ref(PipelineTTS *         pt,
+                                                         PipelineCodec *       pc,
+                                                         const BPETokenizer *  tok,
+                                                         const std::string &   text,
+                                                         const std::string &   lang,
+                                                         const std::string &   instruct,
+                                                         int                   T_override,
+                                                         float                 chunk_duration_sec,
+                                                         float                 chunk_threshold_sec,
+                                                         bool                  denoise,
+                                                         bool                  preprocess_prompt,
+                                                         const MaskgitConfig & mg_cfg,
+                                                         const float *         ref_audio_24k,
+                                                         int                   ref_n_samples,
+                                                         const std::string &   ref_text_in,
+                                                         const char *          dump_dir) {
+    // No reference : pure TTS path. ref_rms = -1 routes the post-proc volume
+    // branch to peak / 0.5 normalisation.
+    if (ref_audio_24k == NULL || ref_n_samples <= 0) {
+        return pipeline_tts_synthesize_long(pt, pc, tok, text, lang, instruct, T_override, chunk_duration_sec,
+                                            chunk_threshold_sec, denoise, mg_cfg, "", NULL, 0, -1.0f, dump_dir);
+    }
+
+    // Encode the optional reference WAV into ref_audio_tokens once, before
+    // the synthesize call. The codec encodes 24 kHz mono into [K, T_ref]
+    // i32 codes ; the caller is expected to have resampled and downmixed
+    // already (audio_read_mono or equivalent).
+    std::string ref_text = ref_text_in;
+
+    // Mirror Python preprocess_prompt: append a terminal "." (or ideographic
+    // full stop for CJK) when missing.
+    if (preprocess_prompt) {
+        ref_text = add_punctuation(ref_text);
+    }
+
+    std::vector<float> ref_audio(ref_audio_24k, ref_audio_24k + ref_n_samples);
+
+    // Mirror Python OmniVoice : compute ref_rms once on the loaded waveform.
+    // Auto loudness normalisation when ref RMS is in (0, 0.1). Scales the
+    // buffer so the new RMS hits exactly 0.1 ; the ORIGINAL ref_rms is what
+    // we plumb into the post-proc to rescale the generated output back to
+    // the reference loudness.
+    double sumsq = 0.0;
+    for (float v : ref_audio) {
+        sumsq += (double) v * (double) v;
+    }
+
+    double ref_rms              = std::sqrt(sumsq / (double) ref_audio.size());
+    float  ref_rms_for_postproc = (float) ref_rms;
+
+    if (ref_rms > 0.0 && ref_rms < 0.1) {
+        float gain = (float) (0.1 / ref_rms);
+        for (float & v : ref_audio) {
+            v *= gain;
+        }
+
+        fprintf(stderr, "[TTS] Reference: RMS %.4f -> 0.1 gain %.4f\n", ref_rms, gain);
+    }
+
+    // Mirror Python preprocess_prompt: silence-trim the reference clip with
+    // mid=200ms, lead=100ms, trail=200ms, threshold=-50 dBFS before encoding.
+    if (preprocess_prompt) {
+        size_t before = ref_audio.size();
+        remove_silence(ref_audio, 24000, 200, 100, 200, -50.0);
+        fprintf(stderr, "[TTS] Reference: silence-trim %zu -> %zu samples\n", before, ref_audio.size());
+    }
+
+    int n_in      = (int) ref_audio.size();
+    int n_aligned = (n_in / pc->hop_length) * pc->hop_length;
+    fprintf(stderr, "[TTS] Reference: %d samples @ 24 kHz mono (%.2f s), aligned to %d (clip %d)\n", n_in,
+            (double) n_in / 24000.0, n_aligned, n_in - n_aligned);
+
+    std::vector<int32_t> ref_codes = pipeline_codec_encode(pc, ref_audio.data(), n_aligned, dump_dir);
+    if (ref_codes.empty()) {
+        fprintf(stderr, "[TTS] ERROR: codec_encode failed on reference audio\n");
+        return {};
+    }
+
+    const int K = pt->lm.num_audio_codebook;
+    if ((int) ref_codes.size() % K != 0) {
+        fprintf(stderr, "[TTS] ERROR: ref codes size %zu not divisible by K=%d\n", ref_codes.size(), K);
+        return {};
+    }
+
+    int ref_T = (int) ref_codes.size() / K;
+    fprintf(stderr, "[TTS] Reference: encoded to [K=%d, T=%d] codes\n", K, ref_T);
+    if (dump_dir) {
+        DebugDumper dbg;
+        debug_init(&dbg, dump_dir);
+        int ref_shape[2] = { K, ref_T };
+        debug_dump_i32_as_f32(&dbg, "ref-audio-codes", ref_codes.data(), ref_shape, 2);
+    }
+
+    return pipeline_tts_synthesize_long(pt, pc, tok, text, lang, instruct, T_override, chunk_duration_sec,
+                                        chunk_threshold_sec, denoise, mg_cfg, ref_text, ref_codes.data(), ref_T,
+                                        ref_rms_for_postproc, dump_dir);
 }
