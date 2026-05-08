@@ -83,32 +83,150 @@ static const std::set<std::string> & chunker_abbreviations() {
     return s;
 }
 
-// Returns the last whitespace-delimited word of s, or s itself if no space.
-// Used to detect abbreviation periods.
-static std::string chunker_last_word(const std::string & s) {
-    size_t e = s.find_last_not_of(" \t\n\r");
-    if (e == std::string::npos) {
-        return std::string();
+// Returns true if cp (a UTF-8 codepoint string) is whitespace per Python's
+// str.split() / str.strip() definition : ASCII (\t \n \v \f \r space) plus
+// the Unicode whitespace block. Mirrors str.isspace() semantics on the
+// codepoints produced by tokenising text into characters.
+static bool chunker_is_unicode_whitespace(const std::string & cp) {
+    if (cp.size() == 1) {
+        unsigned char b = (unsigned char) cp[0];
+        return b == ' ' || b == '\t' || b == '\n' || b == '\r' || b == '\v' || b == '\f';
     }
 
-    std::string trimmed = s.substr(0, e + 1);
-    size_t      sp      = trimmed.find_last_of(" \t\n\r");
-    if (sp == std::string::npos) {
-        return trimmed;
+    if (cp.size() == 2) {
+        // U+0085 NEL (C2 85), U+00A0 NBSP (C2 A0).
+        if ((unsigned char) cp[0] == 0xC2) {
+            unsigned char b1 = (unsigned char) cp[1];
+            return b1 == 0x85 || b1 == 0xA0;
+        }
+        return false;
     }
 
-    return trimmed.substr(sp + 1);
+    if (cp.size() == 3) {
+        unsigned char b0 = (unsigned char) cp[0];
+        unsigned char b1 = (unsigned char) cp[1];
+        unsigned char b2 = (unsigned char) cp[2];
+        uint32_t      u  = ((uint32_t) (b0 & 0x0F) << 12) | ((uint32_t) (b1 & 0x3F) << 6) | ((uint32_t) (b2 & 0x3F));
+
+        // U+1680 OGHAM SPACE MARK
+        if (u == 0x1680) {
+            return true;
+        }
+        // U+2000..U+200A en quad/em/thin/hair spaces
+        if (u >= 0x2000 && u <= 0x200A) {
+            return true;
+        }
+        // U+2028 LINE SEP, U+2029 PARAGRAPH SEP, U+202F NARROW NBSP
+        if (u == 0x2028 || u == 0x2029 || u == 0x202F) {
+            return true;
+        }
+        // U+205F MEDIUM MATHEMATICAL SPACE
+        if (u == 0x205F) {
+            return true;
+        }
+        // U+3000 IDEOGRAPHIC SPACE
+        if (u == 0x3000) {
+            return true;
+        }
+        // U+FEFF ZERO WIDTH NO-BREAK SPACE (BOM)
+        if (u == 0xFEFF) {
+            return true;
+        }
+        return false;
+    }
+
+    return false;
 }
 
-// Strips leading and trailing ASCII whitespace from s.
+// Returns the last whitespace-delimited word of s, or s itself if no
+// whitespace. Used to detect abbreviation periods. Matches Python
+// str.split()[-1] semantics : whitespace is the Unicode whitespace block,
+// not just ASCII, so a non-breaking space before "Mr." still detects the
+// abbreviation.
+static std::string chunker_last_word(const std::string & s) {
+    // Walk codepoints, find the byte index right after the last whitespace
+    // run that is followed by at least one non-whitespace codepoint.
+    const unsigned char * p   = (const unsigned char *) s.data();
+    const unsigned char * end = p + s.size();
+
+    size_t last_word_byte_start = 0;
+    bool   prev_was_ws          = true;
+    bool   any_non_ws           = false;
+    size_t trailing_ws_start_at = s.size();
+
+    while (p < end) {
+        int n = chunker_utf8_len(*p);
+        if (p + n > end) {
+            n = (int) (end - p);
+        }
+        std::string cp((const char *) p, (size_t) n);
+        size_t      byte_pos = (size_t) (p - (const unsigned char *) s.data());
+
+        bool is_ws = chunker_is_unicode_whitespace(cp);
+        if (is_ws) {
+            if (!prev_was_ws) {
+                trailing_ws_start_at = byte_pos;
+            }
+        } else {
+            if (prev_was_ws) {
+                last_word_byte_start = byte_pos;
+            }
+            any_non_ws           = true;
+            trailing_ws_start_at = byte_pos + (size_t) n;
+        }
+        prev_was_ws = is_ws;
+        p += n;
+    }
+
+    if (!any_non_ws) {
+        return std::string();
+    }
+    return s.substr(last_word_byte_start, trailing_ws_start_at - last_word_byte_start);
+}
+
+// Strips leading and trailing Unicode whitespace from s. Matches Python
+// str.strip() : ASCII whitespace plus NBSP, ideographic space, thin
+// spaces, BOM and the rest of the Unicode whitespace block.
 static std::string chunker_strip(const std::string & s) {
-    size_t a = s.find_first_not_of(" \t\n\r");
-    if (a == std::string::npos) {
+    const unsigned char * p   = (const unsigned char *) s.data();
+    const unsigned char * end = p + s.size();
+
+    // Walk forward to find first non whitespace codepoint.
+    size_t start_byte = 0;
+    while (p < end) {
+        int n = chunker_utf8_len(*p);
+        if (p + n > end) {
+            n = (int) (end - p);
+        }
+        std::string cp((const char *) p, (size_t) n);
+        if (!chunker_is_unicode_whitespace(cp)) {
+            break;
+        }
+        p += n;
+        start_byte += (size_t) n;
+    }
+
+    if (p >= end) {
         return std::string();
     }
 
-    size_t b = s.find_last_not_of(" \t\n\r");
-    return s.substr(a, b - a + 1);
+    // Walk forward through the remainder, tracking the byte index after the
+    // last non whitespace codepoint.
+    size_t after_last_non_ws = start_byte;
+    while (p < end) {
+        int n = chunker_utf8_len(*p);
+        if (p + n > end) {
+            n = (int) (end - p);
+        }
+        std::string cp((const char *) p, (size_t) n);
+        size_t      pos = (size_t) (p - (const unsigned char *) s.data());
+        if (!chunker_is_unicode_whitespace(cp)) {
+            after_last_non_ws = pos + (size_t) n;
+        }
+        p += n;
+    }
+
+    return s.substr(start_byte, after_last_non_ws - start_byte);
 }
 
 // Splits text on sentence-ending punctuation (skipping abbreviations) and
