@@ -370,7 +370,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--prompt",    default="../examples/prompt.txt")
     ap.add_argument("--ref-text",  default="../examples/freeman.txt")
-    ap.add_argument("--ref-audio", default="../examples/freeman.wav")
+    ap.add_argument("--ref-wav",   default="../examples/freeman.wav")
     ap.add_argument("--seed",      type=int, default=42)
     ap.add_argument("--lang",      default="English")
     ap.add_argument("--duration",  type=float, default=None)
@@ -398,7 +398,7 @@ def main():
         ref_text = f.read().strip()
     print(f"[Input] Prompt: {len(text)} chars: {text[:60]}{'...' if len(text) > 60 else ''}")
     print(f"[Input] RefText: {len(ref_text)} chars: {ref_text[:60]}{'...' if len(ref_text) > 60 else ''}")
-    print(f"[Input] RefWav: {args.ref_audio}")
+    print(f"[Input] RefWav: {args.ref_wav}")
     print(f"[Input] Language: {args.lang}")
     print(f"[Input] Seed: {args.seed}")
 
@@ -414,7 +414,7 @@ def main():
         text=text,
         language=args.lang,
         ref_text=ref_text,
-        ref_audio=args.ref_audio,
+        ref_audio=args.ref_wav,
         duration=args.duration,
     )
     audios = model.generate(**gen_kwargs)
@@ -434,7 +434,7 @@ def main():
         "--model",         model_lm,
         "--codec",         model_cdc,
         "--seed",          str(args.seed),
-        "--ref-wav",       args.ref_audio,
+        "--ref-wav",       args.ref_wav,
         "--ref-text",      args.ref_text,
         "--lang",          args.lang,
         "--format",        "wav32",
