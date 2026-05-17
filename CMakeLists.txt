@@ -21,10 +21,13 @@ find_package(Threads REQUIRED)
 
 # Suppress MSVC fopen/sprintf deprecation warnings, force UTF-8 source and
 # execution charsets so non-ASCII string literals (CJK in voice-design.h,
-# lang-map.h, text-chunker.h) survive the compile without a BOM.
+# lang-map.h, text-chunker.h) survive the compile without a BOM. /utf-8 is
+# restricted to C and C++ since nvcc treats a bare /utf-8 as an input
+# filename and aborts with "A single input file is required". CUDA sources
+# do not carry CJK literals so they do not need this flag.
 if(MSVC)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
-    add_compile_options(/utf-8)
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/utf-8>)
 endif()
 
 # Put executables and backend .so in the same directory (build root).
