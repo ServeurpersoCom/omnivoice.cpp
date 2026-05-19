@@ -1,0 +1,93 @@
+# Intel Arc A310 (DG2, 4 GB VRAM) — SYCL0 backend
+# oneAPI 2026.0, Level Zero 1.6.33578+15, Ubuntu 24.04 LXC
+# Captured via the sibling qwentts.cpp project (identical ggml SYCL backend
+# and CMakeLists.txt structure). The SYCL codepath exercised here is the same
+# ggml-sycl shared library used by omnivoice.cpp.
+# Model: qwen-talker-0.6b-base-Q8_0.gguf + qwen-tokenizer-12hz-Q8_0.gguf
+# Input: "Hello world. This is a test of Intel Arc GPU acceleration for text to speech."
+# Seed: 42, max-new: 128, lang: English
+
+[Qwen] qwentts.cpp 55b7234 (2026-05-17)
+Build with Macros:
+  GGML_SYCL_FORCE_MMQ: no
+  GGML_SYCL_F16: no
+  GGML_SYCL_GRAPH: yes
+  GGML_SYCL_DNNL: yes
+Running with Environment Variables:
+  GGML_SYCL_DEBUG: 0
+  GGML_SYCL_DISABLE_OPT: 0
+  GGML_SYCL_DISABLE_GRAPH: 1
+  GGML_SYCL_DISABLE_DNN: DNN disabled by compile flag
+  GGML_SYCL_PRIORITIZE_DMMV: 0
+  GGML_SYCL_ENABLE_FLASH_ATTN: 1
+Found 1 SYCL devices:
+|  |                   |                                       |       |Max    |        |Max  |Global |                     |
+|  |                   |                                       |       |compute|Max work|sub  |mem    |                     |
+|ID|        Device Type|                                   Name|Version|units  |group   |group|size   |       Driver version|
+|--|-------------------|---------------------------------------|-------|-------|--------|-----|-------|---------------------|
+| 0| [level_zero:gpu:0]|             Intel Arc A310 LP Graphics|  12.56|     96|    1024|   32|  4032M|         1.6.33578+15|
+SYCL Optimization Feature:
+|ID|        Device Type|Reorder|
+|--|-------------------|-------|
+| 0| [level_zero:gpu:0]|      Y|
+[Load] Talker backend: SYCL0 (CPU threads: 2)
+[GGUF] models/qwen-talker-0.6b-base-Q8_0.gguf: 478 tensors, data at offset 5954368
+[WeightCtx] Loaded 316 tensors, 774.6 MB into backend
+[Talker] Loaded: 28 layers, hidden 1024, heads 16/8, head_dim 128, FFN 3072, RoPE theta 1000000, mrope sections [24,20,20] interleaved=0
+[WeightCtx] Loaded 86 tensors, 143.5 MB into backend
+[CodePredictor] Loaded: 5 layers, hidden 1024, heads 16/8, head_dim 128, FFN 3072, RoPE theta 1000000, 15 acoustic codebooks (vocab 2048 each), mtp_proj identity
+[WeightCtx] Loaded 76 tensors, 22.9 MB into backend
+[SpeakerEncoder] Loaded: enc_dim=1024 sr=24000 mel_dim=128 hidden=512 mfa=1536 asp_attn=128 se=128 scale=8
+[GGUF] models/qwen-tokenizer-12hz-Q8_0.gguf: 398 tensors, data at offset 29760
+[WeightCtx] Loaded 18 tensors, 33.0 MB into backend
+[Quantizer] Loaded: 16 codebooks (1 semantic + 15 acoustic), 2048 entries x 256 dim, hidden 512
+[WeightCtx] Loaded 93 tensors, 30.9 MB into backend
+[Transformer] Loaded: 8 layers, hidden 512, heads 16/16, head_dim 64, FFN 1024, RoPE theta 10000, sliding window 72
+[WeightCtx] Loaded 22 tensors, 33.1 MB into backend
+[Upsample] Loaded: 2 blocks (2x ratio per block), channels 1024, dwconv kernel 7
+[WeightCtx] Loaded 118 tensors, 142.9 MB into backend
+[DAC] Loaded: 4 blocks (strides 8/5/4/3), 24 kHz mono out, weights 142.9 MB
+[WeightCtx] Loaded 2 tensors, 3.0 MB into backend
+[WeightCtx] Loaded 28 tensors, 24.1 MB into backend
+[SEANet] Loaded: 4 stages (ratios 4/5/6/8), 64 -> 512 channels, weights 24.1 MB
+[WeightCtx] Loaded 96 tensors, 25.6 MB into backend
+[EncTransformer] Loaded: 8 layers, hidden 512, heads 8/8, head_dim 64, FFN 2048, RoPE theta 10000
+[WeightCtx] Loaded 1 tensors, 2.0 MB into backend
+[EncDownsample] Loaded: k=4 stride=2, 512 -> 512 channels, weights 2.0 MB
+[WeightCtx] Loaded 20 tensors, 34.0 MB into backend
+[EncQuantizer] Loaded: 16 codebooks (1 semantic + 15 acoustic), 2048 entries x 256 dim, hidden 512, weights 34.0 MB
+[Pipeline] Ready: hop 1920 samples @ 24000 Hz mono, 16 codebooks @ 12.5 Hz
+[KVCache] Allocated: 28 layers, 8 KV heads, head_dim 128, max_seq_len 4096 -> 896 MB
+[KVCache] Allocated: 5 layers, 8 KV heads, head_dim 128, max_seq_len 16 -> 0 MB
+[Pipeline] Loaded: arch=0b6 variant=base tokenizer=qwen3_tts_tokenizer_12hz codebooks=16 speaker_encoder=loaded speakers=0 fa=on clamp_fp16=off
+[BPE] Loaded from GGUF: 151676 vocab, 151291 merges, eos_id=151643
+[BPE] Registered 5 arch special tokens (total specials=6)
+[Prompt] Built: 25 ids, N_text=17, N_instruct=0, T_ctx=27, hidden=1024, lang=English (id=2050), speaker=none (id=-1) ref_spk_emb=no icl=no
+[Sample] step=0 c0=1221 u=0.6129598618 subseq=0
+[Sample-CP] g=0 c=16 u=0.0100588445 subseq=1
+[Sample-CP] g=1 c=580 u=0.3984136879 subseq=2
+[Sample-CP] g=2 c=159 u=0.0403083973 subseq=3
+[Sample-CP] g=3 c=445 u=0.1562667489 subseq=4
+[Sample-CP] g=4 c=651 u=0.4824730754 subseq=5
+[Sample-CP] g=5 c=1186 u=0.7362473011 subseq=6
+[Sample-CP] g=6 c=886 u=0.4059819579 subseq=7
+[Sample-CP] g=7 c=1385 u=0.5188996196 subseq=8
+[Sample-CP] g=8 c=224 u=0.2867110968 subseq=9
+[Sample-CP] g=9 c=448 u=0.2415804267 subseq=10
+[Sample-CP] g=10 c=1930 u=0.9228392243 subseq=11
+[Sample-CP] g=11 c=1527 u=0.8299142122 subseq=12
+[Sample-CP] g=12 c=32 u=0.0341879092 subseq=13
+[Sample-CP] g=13 c=563 u=0.3878940344 subseq=14
+[Sample-CP] g=14 c=163 u=0.0823899582 subseq=15
+[Sample] step=1 c0=1204 u=0.7741796374 subseq=16
+[Pipeline] Generated 8 frames
+[Pipeline] Generated 16 frames
+[Pipeline] Generated 24 frames
+[Pipeline] Generated 32 frames
+[Pipeline] Generated 40 frames
+[Pipeline] Generated 48 frames
+[Pipeline] Generated 56 frames
+[Pipeline] EOS at step 63, stopping
+[Pipeline] Generation done : 63 frames
+[WAV] Wrote /tmp/test-arc.wav: 120960 samples, 24000 Hz, mono S16
+[Pipeline] Wrote 120960 samples (5.04 s) -> /tmp/test-arc.wav
