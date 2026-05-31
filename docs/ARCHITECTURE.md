@@ -658,77 +658,62 @@ everything else.
 
 ### omnivoice-tts
 
-End-to-end synthesis : text on stdin, WAV file on disk.
+End-to-end synthesis : text on stdin, WAV file on disk. Verbatim
+`--help` (the binary also prints an `omnivoice.cpp <hash> (<date>)`
+banner line first) :
 
 ```
 Usage: omnivoice-tts --model <gguf> --codec <gguf> [options] -o <out.wav> < text.txt
 
-Required
+Required:
   --model <gguf>          LLM GGUF (F32 / BF16 / Q8_0)
   --codec <gguf>          Codec GGUF (omnivoice-tokenizer-*.gguf)
-  -o <path>               Output WAV (24 kHz mono)
+  -o <path>               Output WAV (24 kHz mono). '-' streams to stdout (pipe friendly).
 
-Generation
-  --format <fmt>          WAV output format: wav16, wav24, wav32 (default wav16)
-  --lang <str>            Language label (default 'None'). Accepts ISO 639-3
-                          codes or English language names; resolved through
-                          lang-map.h.
-  --instruct <str>        Style instruction. Free text, or attribute keywords
-                          for voice design.
-  --duration <sec>        Force output duration. Default: estimated from text.
-  --no-denoise            Omit the <|denoise|> prefix in the prompt.
-  --seed <int>            Sampling seed. -1 uses a fresh random seed (default).
+Input:
+  stdin                   Target text to synthesise. With -o '-', stdin is read
+                          incrementally and synthesis starts as soon as the first
+                          sentence boundary is reached. With -o file.wav, stdin is
+                          read fully then synthesised in one shot.
 
-Voice cloning
-  --ref-wav <path>        Reference WAV for voice cloning (any rate, mono/stereo).
-  --ref-text <path>       Transcript file matching --ref-wav (required with it).
-  --no-preprocess-prompt  Skip ref-wav silence trim and ref-text terminal
-                          punctuation. Mirrors preprocess_prompt = False.
+Optional:
+  --format <fmt>          WAV output format: wav16, wav24, wav32 (default: wav16)
+  --lang <str>            Language label (default 'None')
+  --instruct <str>        Style instruction (default 'None')
+  --duration <sec>        Output duration in seconds (default: estimate from text)
+  --no-denoise            Omit the <|denoise|> prefix
+  --ref-wav <path>        Reference WAV for voice cloning
+  --ref-text <path>       Transcript file for the reference (required with --ref-wav)
+  --seed <int>            Sampling seed (default: -1 for random)
+  --no-preprocess-prompt  Skip ref-wav silence trim and ref-text terminal punctuation
+  --chunk-duration <sec>  Long-form chunk duration (default: 15.0, <= 0 disables chunking)
+  --chunk-threshold <sec> Activate chunking above this estimated duration (default: 30.0)
 
-Long-form chunking
-  --chunk-duration <sec>  Chunk size target (default 15.0). <= 0 disables
-                          chunking and forces a single shot synthesis.
-  --chunk-threshold <sec> Activate chunking only if estimated audio exceeds
-                          this duration (default 30.0).
-
-Backend tuning
-  --no-fa                 Disable flash attention. Matches Python eager
-                          attention semantics, used for cossim validation.
-  --clamp-fp16            Clamp hidden states to FP16 range. Stability knob
-                          for FP16 backends.
-
-Validation and debugging
-  --dump <dir>            Dump intermediate tensors (F32) to <dir>. Used by
-                          tests/debug-*-cossim.py for byte-level comparison.
-  --llm-test <input.bin>  Run a single full LLM forward and dump audio_logits.
-  --maskgit-test          Greedy MaskGIT decode (class_temp = 0,
-                          position_temp = 0) and dump audio_tokens [K, T].
-                          Skips codec decode.
+Debug:
+  --no-fa                 Disable flash attention (matches Python eager attention)
+  --clamp-fp16            Clamp hidden states to FP16 range
+  --dump <dir>            Dump intermediate tensors (f32) to <dir>
+  --llm-test <input.bin>  Full LLM forward, dump audio_logits
+  --maskgit-test          Greedy MaskGIT decoder, dump audio_tokens [K, T]
+                          (no codec decode, reads target text from stdin)
 ```
-
-Exit codes : 0 on success, non zero on argument or runtime error
-(diagnostics on stderr).
 
 ### omnivoice-codec
 
 Audio tokenizer round-trip : WAV to RVQ codes, RVQ codes to WAV.
+Verbatim `--help` :
 
 ```
 Usage: omnivoice-codec --model <gguf> -i <input>
 
-Required
+Required:
   --model <gguf>          Codec GGUF (omnivoice-tokenizer-*.gguf)
-  -i <path>               Input. WAV -> encode (.rvq), .rvq -> decode (.wav)
+  -i <path>               Input. WAV -> encode, .rvq -> decode
 
-Optional
-  --format <fmt>          WAV output format: wav16, wav24, wav32 (default wav16)
-```
+Optional:
+  --format <fmt>          WAV output format: wav16, wav24, wav32 (default: wav16)
 
-Output is auto-named next to the input :
-
-```
-clip.wav -> clip.rvq        encode mode
-clip.rvq -> clip.wav        decode mode
+Output is auto-named next to input : clip.wav -> clip.rvq, clip.rvq -> clip.wav.
 ```
 
 The `.rvq` file is a small binary container with shape `[8, T]` int32
