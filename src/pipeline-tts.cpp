@@ -20,6 +20,7 @@
 #include "pipeline-codec.h"
 #include "prompt-tts.h"
 #include "text-chunker.h"
+#include "timer.h"
 #include "voice-design.h"
 
 #include <cmath>
@@ -682,8 +683,11 @@ static std::vector<float> tts_synthesize_one_chunk(PipelineTTS *         pt,
                                                    int                   ref_T,
                                                    const char *          dump_dir,
                                                    uint32_t *            ctr_lo_inout) {
+    Timer                t_total;
+    Timer                t_gen;
     std::vector<int32_t> tokens = pipeline_tts_generate(pt, tok, text, lang, instruct, T, denoise, mg_cfg, ref_text,
                                                         ref_audio_tokens, ref_T, dump_dir, ctr_lo_inout);
+    const double         gen_ms = t_gen.ms();
     if (tokens.empty()) {
         return {};
     }
@@ -711,11 +715,21 @@ static std::vector<float> tts_synthesize_one_chunk(PipelineTTS *         pt,
     debug_dump_i32_as_f32(&dbg, "mg-tokens", tokens.data(), tokens_shape, 2);
 
     ov_log(OV_LOG_INFO, "[TTS] Decode: K=%d T=%d expected_samples=%d", K, T, T * pc->hop_length);
-    std::vector<float> audio = pipeline_codec_decode(pc, tokens.data(), K, T);
+    Timer              t_codec;
+    std::vector<float> audio    = pipeline_codec_decode(pc, tokens.data(), K, T);
+    const double       codec_ms = t_codec.ms();
 
     if (!audio.empty()) {
         debug_dump_1d(&dbg, "output-audio", audio.data(), (int) audio.size());
     }
+
+    const double total_ms = t_total.ms();
+    const double audio_sec =
+        pc->sample_rate > 0 ? (double) T * (double) pc->hop_length / (double) pc->sample_rate : 0.0;
+    const double rtf = audio_sec > 0.0 ? (total_ms / 1000.0) / audio_sec : 0.0;
+    ov_log(OV_LOG_INFO, "[Perf] Generate %.1f ms (MaskGIT, %d steps)", gen_ms, mg_cfg.num_step);
+    ov_log(OV_LOG_INFO, "[Perf] CodecDecode %.1f ms", codec_ms);
+    ov_log(OV_LOG_INFO, "[Perf] Total %.1f ms (T=%d, audio %.2f s, RTF %.3f)", total_ms, T, audio_sec, rtf);
     return audio;
 }
 
