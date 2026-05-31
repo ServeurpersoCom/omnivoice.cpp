@@ -4,6 +4,8 @@ project(omnivoice-ggml LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+option(OV_WEBSERVER "build webserver" ON)
+
 # version.h: embed git commit hash into all binaries.
 # runs on every build, only rewrites if the hash changed.
 set(VERSION_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/version.h")
@@ -150,6 +152,16 @@ link_ggml_backends(omnivoice-codec)
 add_executable(omnivoice-tts tools/omnivoice-tts.cpp)
 target_link_libraries(omnivoice-tts PRIVATE omnivoice-core)
 link_ggml_backends(omnivoice-tts)
+
+# omnivoice-tts-server : an HTTP webserver backed by the TTS pipeline
+if(OV_WEBSERVER)
+    find_package(httplib REQUIRED)
+    find_package(nlohmann_json REQUIRED)
+
+    add_executable(omnivoice-tts-server tools/omnivoice-tts-server.cpp)
+    target_link_libraries(omnivoice-tts-server PRIVATE omnivoice-core httplib::httplib nlohmann_json::nlohmann_json)
+    link_ggml_backends(omnivoice-tts-server)
+endif()
 
 # test-abi-c : pure C99 smoke test that locks in the public ABI contract.
 # Compiles omnivoice.h with a C compiler under -Wall -Werror -pedantic and
