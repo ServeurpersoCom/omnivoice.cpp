@@ -60,7 +60,8 @@ static void print_usage(const char * prog) {
             "  --seed <int>            Sampling seed (default: -1 for random)\n"
             "  --no-preprocess-prompt  Skip ref-wav silence trim and ref-text terminal punctuation\n"
             "  --chunk-duration <sec>  Long-form chunk duration (default: 15.0, <= 0 disables chunking)\n"
-            "  --chunk-threshold <sec> Activate chunking above this estimated duration (default: 30.0)\n\n"
+            "  --chunk-threshold <sec> Activate chunking above this estimated duration (default: 30.0)\n"
+            "  --stream-by-line        When streaming (-o '-'), force synthesis for each line break.\n\n"
             "Debug:\n"
             "  --no-fa                 Disable flash attention (matches Python eager attention)\n"
             "  --clamp-fp16            Clamp hidden states to FP16 range\n"
@@ -211,6 +212,7 @@ static int run_tts_via_ov(const char * model_path,
                           bool         preprocess_prompt,
                           float        chunk_duration_sec,
                           float        chunk_threshold_sec,
+                          bool         stream_by_line,
                           uint64_t     seed_resolved,
                           const char * dump_dir,
                           const char * output_path,
@@ -339,11 +341,37 @@ static int run_tts_via_ov(const char * model_path,
         _setmode(_fileno(stdin), _O_BINARY);
 #endif
 
+        if (stream_by_line) {
+            // Disable stdio buffering so data from stdin is available immediately
+            setvbuf(in, nullptr, _IONBF, 0);
+        }
+
         while (true) {
-            size_t r = fread(buf, 1, sizeof(buf), in);
+            bool flush = false;
+            size_t r = 0;
+            if (stream_by_line) {
+                if (fgets(buf, sizeof(buf), in) != nullptr) {
+                    r = strlen(buf);
+                    flush = (r > 0 && buf[r - 1] == '\n');
+                }
+            } else {
+                r = fread(buf, 1, sizeof(buf), in);
+            }
+            
             if (r > 0) {
                 bytes_in += r;
                 std::vector<std::string> ready = chunker.push_bytes(buf, r);
+
+                if (flush) {
+                    std::vector<std::string> tail = chunker.flush_eof();
+                    ready.insert(ready.end(),
+                        std::make_move_iterator(tail.begin()),
+                        std::make_move_iterator(tail.end()));
+
+                    // Clear the internal buffer by reinitializing
+                    chunker.init(chunk_len_text, OMNIVOICE_MIN_CHUNK_LEN); 
+                }
+
                 for (const auto & ct : ready) {
                     if (synth_one(ct) != 0) {
                         wav_stream_close(&ws);
@@ -430,6 +458,7 @@ static int main_impl(int argc, char ** argv) {
     bool         preprocess_prompt      = true;
     float        chunk_duration_sec     = 15.0f;
     float        chunk_threshold_sec    = 30.0f;
+    bool         stream_by_line         = false;
     const char * ref_wav_path           = NULL;
     const char * ref_text_path          = NULL;
     const char * output_path            = NULL;
@@ -466,6 +495,8 @@ static int main_impl(int argc, char ** argv) {
             chunk_duration_sec = (float) atof(argv[++i]);
         } else if (strcmp(argv[i], "--chunk-threshold") == 0 && i + 1 < argc) {
             chunk_threshold_sec = (float) atof(argv[++i]);
+        } else if (strcmp(argv[i], "--stream-by-line") == 0) {
+            stream_by_line = true;
         } else if (strcmp(argv[i], "--ref-wav") == 0 && i + 1 < argc) {
             ref_wav_path = argv[++i];
         } else if (strcmp(argv[i], "--ref-text") == 0 && i + 1 < argc) {
@@ -533,7 +564,8 @@ static int main_impl(int argc, char ** argv) {
     if (tts_mode) {
         return run_tts_via_ov(model_path, codec_path, use_fa, clamp_fp16, ref_wav_path, ref_text_path, prompt_lang,
                               prompt_instruct, prompt_duration_sec, prompt_denoise, preprocess_prompt,
-                              chunk_duration_sec, chunk_threshold_sec, seed_resolved, dump_dir, output_path, wav_fmt);
+                              chunk_duration_sec, chunk_threshold_sec, stream_by_line,
+                              seed_resolved, dump_dir, output_path, wav_fmt);
     }
 
     BackendPair bp = backend_init("LM");
