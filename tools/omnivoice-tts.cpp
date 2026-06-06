@@ -347,29 +347,28 @@ static int run_tts_via_ov(const char * model_path,
         }
 
         while (true) {
-            bool flush = false;
-            size_t r = 0;
+            bool   flush = false;
+            size_t r     = 0;
             if (stream_by_line) {
                 if (fgets(buf, sizeof(buf), in) != nullptr) {
-                    r = strlen(buf);
+                    r     = strlen(buf);
                     flush = (r > 0 && buf[r - 1] == '\n');
                 }
             } else {
                 r = fread(buf, 1, sizeof(buf), in);
             }
-            
+
             if (r > 0) {
                 bytes_in += r;
                 std::vector<std::string> ready = chunker.push_bytes(buf, r);
 
                 if (flush) {
                     std::vector<std::string> tail = chunker.flush_eof();
-                    ready.insert(ready.end(),
-                        std::make_move_iterator(tail.begin()),
-                        std::make_move_iterator(tail.end()));
+                    ready.insert(ready.end(), std::make_move_iterator(tail.begin()),
+                                 std::make_move_iterator(tail.end()));
 
                     // Clear the internal buffer by reinitializing
-                    chunker.init(chunk_len_text, OMNIVOICE_MIN_CHUNK_LEN); 
+                    chunker.init(chunk_len_text, OMNIVOICE_MIN_CHUNK_LEN);
                 }
 
                 for (const auto & ct : ready) {
@@ -564,8 +563,8 @@ static int main_impl(int argc, char ** argv) {
     if (tts_mode) {
         return run_tts_via_ov(model_path, codec_path, use_fa, clamp_fp16, ref_wav_path, ref_text_path, prompt_lang,
                               prompt_instruct, prompt_duration_sec, prompt_denoise, preprocess_prompt,
-                              chunk_duration_sec, chunk_threshold_sec, stream_by_line,
-                              seed_resolved, dump_dir, output_path, wav_fmt);
+                              chunk_duration_sec, chunk_threshold_sec, stream_by_line, seed_resolved, dump_dir,
+                              output_path, wav_fmt);
     }
 
     BackendPair bp = backend_init("LM");

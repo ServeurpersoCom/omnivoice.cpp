@@ -6,8 +6,9 @@
 // OmniVoice has no named speaker table, so GET /v1/voices is empty. The
 // OAI voice field is ignored ; the instructions field drives voice design.
 
-#include "omnivoice.h"
 #include "tts-server.h"
+
+#include "omnivoice.h"
 #include "version.h"
 
 #include <cstdio>
