@@ -55,10 +55,15 @@ struct text_chunker_stream {
     }
 
     // EOF drain: every chunk in the offline result is now stable. The
-    // look ahead pipeline runs to completion.
+    // look ahead pipeline runs to completion and the chunker comes out
+    // fresh, so a caller can keep pushing a new stream after the drain
+    // (line oriented streaming flushes at every newline).
     std::vector<std::string> flush_eof() {
         std::vector<std::string> all = chunk_text_punctuation(buffer, chunk_len, 0);
-        return advance(all, true);
+        std::vector<std::string> out = advance(all, true);
+        buffer.clear();
+        n_seen = 0;
+        return out;
     }
 
   private:

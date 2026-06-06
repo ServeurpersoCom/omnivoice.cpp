@@ -368,24 +368,18 @@ struct wav_stream {
     int       sr;
 };
 
-// Open a streaming WAV sink on stdout. Switches stdout to binary mode on
-// Windows. Header advertises 0x7FFFFFFF for both RIFF chunk size and data
-// chunk size, the conventional "unknown / live" marker that aplay, ffmpeg
-// and most players accept by reading until EOF.
-static bool wav_stream_open_stdout(wav_stream * ws, int sr, WavFormat fmt) {
-    ws->fp  = stdout;
-    ws->fmt = fmt;
-    ws->sr  = sr;
-
-#if defined(_WIN32)
-    _setmode(_fileno(stdout), _O_BINARY);
-#endif
-
-    int      bits             = (fmt == WAV_S16) ? 16 : (fmt == WAV_S24) ? 24 : 32;
-    uint16_t fmt_tag          = (fmt == WAV_F32) ? 3 : 1;
+// Write a fresh 44 byte RIFF header on the sink. Both the RIFF chunk size
+// and the data chunk size advertise 0x7FFFFFFF, the conventional
+// "unknown / live" marker that aplay, ffmpeg and most players accept by
+// reading until EOF. Called once at open, and again at every utterance
+// boundary by line oriented streaming so a client can split the stream
+// into standalone WAV clips on the RIFF magic.
+static bool wav_stream_write_header(wav_stream * ws) {
+    int      bits             = (ws->fmt == WAV_S16) ? 16 : (ws->fmt == WAV_S24) ? 24 : 32;
+    uint16_t fmt_tag          = (ws->fmt == WAV_F32) ? 3 : 1;
     int      n_channels       = 1;
     uint32_t bytes_per_sample = (uint32_t) bits / 8;
-    uint32_t byte_rate        = (uint32_t) sr * (uint32_t) n_channels * bytes_per_sample;
+    uint32_t byte_rate        = (uint32_t) ws->sr * (uint32_t) n_channels * bytes_per_sample;
     uint16_t block_align      = (uint16_t) (n_channels * (int) bytes_per_sample);
     uint32_t data_size        = 0x7FFFFFFFu;
     uint32_t file_size        = 0x7FFFFFFFu;
@@ -404,7 +398,7 @@ static bool wav_stream_open_stdout(wav_stream * ws, int sr, WavFormat fmt) {
     wav_write_u32le(p, 16);
     wav_write_u16le(p, fmt_tag);
     wav_write_u16le(p, (uint16_t) n_channels);
-    wav_write_u32le(p, (uint32_t) sr);
+    wav_write_u32le(p, (uint32_t) ws->sr);
     wav_write_u32le(p, byte_rate);
     wav_write_u16le(p, block_align);
     wav_write_u16le(p, (uint16_t) bits);
@@ -418,6 +412,23 @@ static bool wav_stream_open_stdout(wav_stream * ws, int sr, WavFormat fmt) {
         return false;
     }
     fflush(ws->fp);
+    return true;
+}
+
+// Open a streaming WAV sink on stdout. Switches stdout to binary mode on
+// Windows and writes the initial live header.
+static bool wav_stream_open_stdout(wav_stream * ws, int sr, WavFormat fmt) {
+    ws->fp  = stdout;
+    ws->fmt = fmt;
+    ws->sr  = sr;
+
+#if defined(_WIN32)
+    _setmode(_fileno(stdout), _O_BINARY);
+#endif
+
+    if (!wav_stream_write_header(ws)) {
+        return false;
+    }
 
     const char * fmt_name = (fmt == WAV_S16) ? "S16" : (fmt == WAV_S24) ? "S24" : "F32";
     fprintf(stderr, "[WAV-Stream] stdout: %d Hz, mono %s\n", sr, fmt_name);

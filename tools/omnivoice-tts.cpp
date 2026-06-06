@@ -61,7 +61,7 @@ static void print_usage(const char * prog) {
             "  --no-preprocess-prompt  Skip ref-wav silence trim and ref-text terminal punctuation\n"
             "  --chunk-duration <sec>  Long-form chunk duration (default: 15.0, <= 0 disables chunking)\n"
             "  --chunk-threshold <sec> Activate chunking above this estimated duration (default: 30.0)\n"
-            "  --stream-by-line        When streaming (-o '-'), force synthesis for each line break.\n\n"
+            "  --stream-by-line        Flush synthesis at each newline, one WAV header per line (-o '-')\n\n"
             "Debug:\n"
             "  --no-fa                 Disable flash attention\n"
             "  --clamp-fp16            Clamp hidden states to FP16 range\n"
@@ -301,7 +301,20 @@ static int run_tts_via_ov(const char * model_path,
         int    n_emitted = 0;
         size_t bytes_in  = 0;
 
+        // Line oriented streaming opens every utterance after the first
+        // with a fresh RIFF header, so a client can split the stream into
+        // one standalone WAV per line on the RIFF magic. The flag is armed
+        // when a line finishes and consumed lazily at the next audio, so a
+        // trailing or empty line never emits an orphan header.
+        bool need_header = false;
+
         auto synth_one = [&](const std::string & chunk_text) -> int {
+            if (need_header) {
+                if (!wav_stream_write_header(&ws)) {
+                    return 1;
+                }
+                need_header = false;
+            }
             ov_tts_params params;
             ov_tts_default_params(&params);
             params.text                = chunk_text.c_str();
@@ -334,17 +347,15 @@ static int run_tts_via_ov(const char * model_path,
         // Read loop: 4 KiB chunks, push to the incremental chunker, drain
         // ready chunks, synth each. Block on stdin between reads, no
         // polling. Suitable for piped LLM output that produces bytes at
-        // its own pace.
+        // its own pace. With --stream-by-line the read is line oriented:
+        // every newline drains the chunker so the line synthesises now,
+        // and the next line opens with a fresh RIFF header. Lines are
+        // text, an embedded NUL truncates the read at strlen.
         char   buf[4096];
         FILE * in = stdin;
 #if defined(_WIN32)
         _setmode(_fileno(stdin), _O_BINARY);
 #endif
-
-        if (stream_by_line) {
-            // Disable stdio buffering so data from stdin is available immediately
-            setvbuf(in, nullptr, _IONBF, 0);
-        }
 
         while (true) {
             bool   flush = false;
@@ -366,9 +377,6 @@ static int run_tts_via_ov(const char * model_path,
                     std::vector<std::string> tail = chunker.flush_eof();
                     ready.insert(ready.end(), std::make_move_iterator(tail.begin()),
                                  std::make_move_iterator(tail.end()));
-
-                    // Clear the internal buffer by reinitializing
-                    chunker.init(chunk_len_text, OMNIVOICE_MIN_CHUNK_LEN);
                 }
 
                 for (const auto & ct : ready) {
@@ -377,6 +385,10 @@ static int run_tts_via_ov(const char * model_path,
                         ov_free(ov);
                         return 1;
                     }
+                }
+
+                if (flush) {
+                    need_header = true;
                 }
             }
             if (feof(in) || ferror(in)) {

@@ -688,6 +688,7 @@ Optional:
   --no-preprocess-prompt  Skip ref-wav silence trim and ref-text terminal punctuation
   --chunk-duration <sec>  Long-form chunk duration (default: 15.0, <= 0 disables chunking)
   --chunk-threshold <sec> Activate chunking above this estimated duration (default: 30.0)
+  --stream-by-line        Flush synthesis at each newline, one WAV header per line (-o '-')
 
 Debug:
   --no-fa                 Disable flash attention
