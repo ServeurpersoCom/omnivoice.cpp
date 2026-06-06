@@ -690,7 +690,7 @@ Optional:
   --chunk-threshold <sec> Activate chunking above this estimated duration (default: 30.0)
 
 Debug:
-  --no-fa                 Disable flash attention (matches Python eager attention)
+  --no-fa                 Disable flash attention
   --clamp-fp16            Clamp hidden states to FP16 range
   --dump <dir>            Dump intermediate tensors (f32) to <dir>
   --llm-test <input.bin>  Full LLM forward, dump audio_logits

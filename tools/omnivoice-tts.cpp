@@ -62,7 +62,7 @@ static void print_usage(const char * prog) {
             "  --chunk-duration <sec>  Long-form chunk duration (default: 15.0, <= 0 disables chunking)\n"
             "  --chunk-threshold <sec> Activate chunking above this estimated duration (default: 30.0)\n\n"
             "Debug:\n"
-            "  --no-fa                 Disable flash attention (matches Python eager attention)\n"
+            "  --no-fa                 Disable flash attention\n"
             "  --clamp-fp16            Clamp hidden states to FP16 range\n"
             "  --dump <dir>            Dump intermediate tensors (f32) to <dir>\n"
             "  --llm-test <input.bin>  Full LLM forward, dump audio_logits\n"
