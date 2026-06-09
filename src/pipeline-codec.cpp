@@ -270,6 +270,7 @@ std::vector<float> pipeline_codec_decode(PipelineCodec * pc, const int32_t * cod
     ggml_build_forward_expand(graph, audio);
 
     // Allocate intermediates + input/output buffers in one shot on the backend.
+    ggml_backend_sched_reset(pc->sched);
     if (!ggml_backend_sched_alloc_graph(pc->sched, graph)) {
         ov_log(OV_LOG_ERROR, "[PipelineCodec] gallocr_alloc_graph failed");
         ggml_backend_sched_reset(pc->sched);
@@ -489,6 +490,7 @@ std::vector<int32_t> pipeline_codec_encode(PipelineCodec * pc,
         ggml_build_forward_expand(graph, idx_per_k[k]);
     }
 
+    ggml_backend_sched_reset(pc->sched);
     if (!ggml_backend_sched_alloc_graph(pc->sched, graph)) {
         ggml_backend_sched_reset(pc->sched);
         ggml_free(gctx);
@@ -585,6 +587,7 @@ static std::vector<float> pipeline_codec_dac_enc_test(PipelineCodec * pc, const 
     struct ggml_cgraph * graph = ggml_new_graph_custom(gctx, n_max_nodes, false);
     ggml_build_forward_expand(graph, latent);
 
+    ggml_backend_sched_reset(pc->sched);
     if (!ggml_backend_sched_alloc_graph(pc->sched, graph)) {
         ggml_backend_sched_reset(pc->sched);
         ggml_free(gctx);
@@ -745,6 +748,7 @@ static std::vector<float> pipeline_codec_hubert_features_test(PipelineCodec * pc
     struct ggml_cgraph * graph = ggml_new_graph_custom(gctx, n_max_nodes, false);
     ggml_build_forward_expand(graph, features);
 
+    ggml_backend_sched_reset(pc->sched);
     if (!ggml_backend_sched_alloc_graph(pc->sched, graph)) {
         ggml_backend_sched_reset(pc->sched);
         ggml_free(gctx);

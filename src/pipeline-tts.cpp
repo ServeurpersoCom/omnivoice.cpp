@@ -239,6 +239,7 @@ std::vector<float> pipeline_tts_llm_forward(PipelineTTS *   pt,
     struct ggml_cgraph * graph = ggml_new_graph_custom(gctx, n_max_nodes, false);
     ggml_build_forward_expand(graph, logits);
 
+    ggml_backend_sched_reset(pt->sched);
     if (!ggml_backend_sched_alloc_graph(pt->sched, graph)) {
         ov_log(OV_LOG_ERROR, "[LM-Forward] sched_alloc_graph failed (K=%d S=%d)", K, S);
         ggml_free(gctx);
@@ -553,6 +554,7 @@ std::vector<float> pipeline_tts_llm_forward_batched(PipelineTTS *             pt
         ggml_build_forward_expand(graph, logits);
     }
 
+    ggml_backend_sched_reset(pt->sched);
     if (!ggml_backend_sched_alloc_graph(pt->sched, graph)) {
         ov_log(OV_LOG_ERROR, "[LM-Forward-Batched] sched_alloc_graph failed (B'=%d K=%d S=%d)", B_prime, K, S);
         ggml_free(gctx);
