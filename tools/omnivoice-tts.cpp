@@ -3,7 +3,9 @@
 // Default mode synthesises an audio WAV from the target text read on stdin.
 // Voice cloning is enabled by passing --ref-wav <path> and --ref-text <path>
 // (the transcript is read from a file, never from the command line, to keep
-// shell escaping out of the critical path). Debug modes dump intermediate
+// shell escaping out of the critical path). --ref-rvq <path> replaces
+// --ref-wav with a pre-encoded reference produced by omnivoice-codec,
+// skipping the codec encode entirely. Debug modes dump intermediate
 // tensors and bypass the codec decode.
 
 #include "audio-io.h"
@@ -14,6 +16,7 @@
 #include "omnivoice.h"
 #include "pipeline-codec.h"
 #include "pipeline-tts.h"
+#include "rvq-file.h"
 #include "text-chunker-stream.h"
 #include "text-chunker.h"
 #include "utf8.h"
@@ -30,6 +33,9 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+// 11 bits per code (V <= 2048), matching omnivoice-codec.
+static const int RVQ_CODE_BITS = 11;
 
 #if defined(_WIN32)
 #    include <fcntl.h>
@@ -56,7 +62,8 @@ static void print_usage(const char * prog) {
             "  --duration <sec>        Output duration in seconds (default: estimate from text)\n"
             "  --no-denoise            Omit the <|denoise|> prefix\n"
             "  --ref-wav <path>        Reference WAV for voice cloning\n"
-            "  --ref-text <path>       Transcript file for the reference (required with --ref-wav)\n"
+            "  --ref-text <path>       Transcript file for the reference (required with --ref-wav / --ref-rvq)\n"
+            "  --ref-rvq <path>        Pre-encoded reference codes from omnivoice-codec (replaces --ref-wav)\n"
             "  --seed <int>            Sampling seed (default: -1 for random)\n"
             "  --no-preprocess-prompt  Skip ref-wav silence trim and ref-text terminal punctuation\n"
             "  --chunk-duration <sec>  Long-form chunk duration (default: 15.0, <= 0 disables chunking)\n"
@@ -204,6 +211,7 @@ static int run_tts_via_ov(const char * model_path,
                           bool         use_fa,
                           bool         clamp_fp16,
                           const char * ref_wav_path,
+                          const char * ref_rvq_path,
                           const char * ref_text_path,
                           const char * prompt_lang,
                           const char * prompt_instruct,
@@ -231,26 +239,41 @@ static int run_tts_via_ov(const char * model_path,
 
     int rc = 0;
 
-    // Optional reference WAV. The handle takes the raw mono 24 kHz buffer;
-    // every preprocessing step (RMS, auto-gain, add_punctuation, silence
-    // trim, hop alignment, codec encode) runs inside ov_synthesize.
-    std::vector<float> ref_audio;
-    std::string        ref_text;
-    if (ref_wav_path) {
-        fprintf(stderr, "[CLI] Reference WAV: %s\n", ref_wav_path);
+    // Optional reference, raw WAV or pre-encoded .rvq tokens. The raw
+    // buffer goes through every preprocessing step (RMS, auto-gain,
+    // add_punctuation, silence trim, hop alignment, codec encode) inside
+    // ov_synthesize; pre-encoded tokens skip straight to the prompt. The
+    // transcript file is common to both reference formats.
+    std::vector<float>   ref_audio;
+    std::vector<int32_t> ref_tokens;
+    int                  ref_T = 0;
+    std::string          ref_text;
+    if (ref_text_path) {
         if (!read_text_file(ref_text_path, ref_text)) {
             ov_free(ov);
             return 1;
         }
+    }
+    if (ref_wav_path) {
+        fprintf(stderr, "[CLI] Reference WAV: %s\n", ref_wav_path);
         int     n_samples = 0;
         float * raw       = audio_read_mono(ref_wav_path, 24000, &n_samples);
         if (!raw || n_samples <= 0) {
             fprintf(stderr, "[OmniVoice-TTS] FATAL: failed to load %s\n", ref_wav_path);
+            free(raw);
             ov_free(ov);
             return 1;
         }
         ref_audio.assign(raw, raw + n_samples);
         free(raw);
+    }
+    if (ref_rvq_path) {
+        const int K = ov_num_codebooks(ov);
+        if (!rvq_read_file(ref_rvq_path, K, RVQ_CODE_BITS, ref_tokens, &ref_T)) {
+            ov_free(ov);
+            return 1;
+        }
+        fprintf(stderr, "[CLI] Reference RVQ: %s, K=%d T=%d\n", ref_rvq_path, K, ref_T);
     }
 
     std::string lang = prompt_lang ? prompt_lang : "";
@@ -328,6 +351,8 @@ static int run_tts_via_ov(const char * model_path,
             params.mg_seed             = seed_resolved;
             params.ref_audio_24k       = ref_audio.empty() ? nullptr : ref_audio.data();
             params.ref_n_samples       = (int) ref_audio.size();
+            params.ref_audio_tokens    = ref_tokens.empty() ? nullptr : ref_tokens.data();
+            params.ref_T               = ref_T;
             params.ref_text            = ref_text.c_str();
             params.dump_dir            = dump_dir;
             params.on_chunk            = [](const float * s, int n, void * ud) -> bool {
@@ -431,6 +456,8 @@ static int run_tts_via_ov(const char * model_path,
     params.mg_seed             = seed_resolved;
     params.ref_audio_24k       = ref_audio.empty() ? nullptr : ref_audio.data();
     params.ref_n_samples       = (int) ref_audio.size();
+    params.ref_audio_tokens    = ref_tokens.empty() ? nullptr : ref_tokens.data();
+    params.ref_T               = ref_T;
     params.ref_text            = ref_text.c_str();
     params.dump_dir            = dump_dir;
 
@@ -471,6 +498,7 @@ static int main_impl(int argc, char ** argv) {
     float        chunk_threshold_sec    = 30.0f;
     bool         stream_by_line         = false;
     const char * ref_wav_path           = NULL;
+    const char * ref_rvq_path           = NULL;
     const char * ref_text_path          = NULL;
     const char * output_path            = NULL;
     bool         use_fa                 = true;
@@ -510,6 +538,8 @@ static int main_impl(int argc, char ** argv) {
             stream_by_line = true;
         } else if (strcmp(argv[i], "--ref-wav") == 0 && i + 1 < argc) {
             ref_wav_path = argv[++i];
+        } else if (strcmp(argv[i], "--ref-rvq") == 0 && i + 1 < argc) {
+            ref_rvq_path = argv[++i];
         } else if (strcmp(argv[i], "--ref-text") == 0 && i + 1 < argc) {
             ref_text_path = argv[++i];
         } else if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
@@ -555,12 +585,16 @@ static int main_impl(int argc, char ** argv) {
         fprintf(stderr, "[CLI] ERROR: synthesis requires --codec\n");
         return 1;
     }
-    if (ref_wav_path && !ref_text_path) {
-        fprintf(stderr, "[CLI] ERROR: --ref-wav requires --ref-text <path>\n");
+    if (ref_wav_path && ref_rvq_path) {
+        fprintf(stderr, "[CLI] ERROR: --ref-wav and --ref-rvq are mutually exclusive\n");
         return 1;
     }
-    if (ref_wav_path && !tts_mode) {
-        fprintf(stderr, "[CLI] ERROR: --ref-wav is only supported in synthesis mode\n");
+    if ((ref_wav_path || ref_rvq_path) && !ref_text_path) {
+        fprintf(stderr, "[CLI] ERROR: --ref-wav / --ref-rvq requires --ref-text <path>\n");
+        return 1;
+    }
+    if ((ref_wav_path || ref_rvq_path) && !tts_mode) {
+        fprintf(stderr, "[CLI] ERROR: --ref-wav / --ref-rvq is only supported in synthesis mode\n");
         return 1;
     }
 
@@ -573,8 +607,8 @@ static int main_impl(int argc, char ** argv) {
     // TTS mode runs through the OmniVoice handle. Debug modes (--llm-test,
     // --maskgit-test) keep their lower-level init flow below.
     if (tts_mode) {
-        return run_tts_via_ov(model_path, codec_path, use_fa, clamp_fp16, ref_wav_path, ref_text_path, prompt_lang,
-                              prompt_instruct, prompt_duration_sec, prompt_denoise, preprocess_prompt,
+        return run_tts_via_ov(model_path, codec_path, use_fa, clamp_fp16, ref_wav_path, ref_rvq_path, ref_text_path,
+                              prompt_lang, prompt_instruct, prompt_duration_sec, prompt_denoise, preprocess_prompt,
                               chunk_duration_sec, chunk_threshold_sec, stream_by_line, seed_resolved, dump_dir,
                               output_path, wav_fmt);
     }

@@ -257,6 +257,12 @@ OV_API enum ov_status ov_synthesize(struct ov_context * ov, const struct ov_tts_
 // frame. Requires a codec-loaded handle.
 OV_API int ov_duration_sec_to_tokens(const struct ov_context * ov, float duration_sec);
 
+// Number of RVQ codebooks (K) of the loaded model. Pre-encoded reference
+// tokens passed via ref_audio_tokens are laid out [K, ref_T] row-major;
+// callers reading a packed .rvq stream need K to derive ref_T from the
+// code count. Returns 0 on a NULL handle.
+OV_API int ov_num_codebooks(const struct ov_context * ov);
+
 #ifdef __cplusplus
 }
 #endif

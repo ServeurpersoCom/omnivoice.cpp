@@ -5,13 +5,20 @@
 // extension: .wav in -> encode, .rvq in -> decode. Output is auto-named
 // next to the input file by swapping the extension.
 //
+// Encode applies the exact TTS reference preprocessing (RMS auto-gain,
+// silence trim, hop truncation), so a .rvq produced here is bit-identical
+// to what the --ref-wav path of omnivoice-tts encodes internally and can
+// be fed back via --ref-rvq.
+//
 // File format (.rvq): flat code stream packed at 11 bits per code, LSB-first,
 // no header. Layout is [K, T] row-major. K is fixed by the codec config in
 // the GGUF (8 codebooks). T = (filesize * 8) / (K * 11).
 
 #include "audio-io.h"
+#include "audio-postproc.h"
 #include "backend.h"
 #include "pipeline-codec.h"
+#include "rvq-file.h"
 #include "utf8.h"
 #include "version.h"
 
@@ -24,8 +31,7 @@
 #include <vector>
 
 // 11 bits per code (V <= 2048).
-static const int      RVQ_CODE_BITS = 11;
-static const uint32_t RVQ_CODE_MASK = (1u << RVQ_CODE_BITS) - 1u;
+static const int RVQ_CODE_BITS = 11;
 
 static void print_usage(const char * prog) {
     fprintf(stderr, "omnivoice.cpp %s\n\n", OMNIVOICE_VERSION);
@@ -36,103 +42,10 @@ static void print_usage(const char * prog) {
             "  -i <path>               Input. WAV -> encode, .rvq -> decode\n\n"
             "Optional:\n"
             "  --format <fmt>          WAV output format: wav16, wav24, wav32 (default: wav16)\n\n"
-            "Output is auto-named next to input : clip.wav -> clip.rvq, clip.rvq -> clip.wav.\n",
+            "Output is auto-named next to input : clip.wav -> clip.rvq, clip.rvq -> clip.wav.\n"
+            "Encode applies the TTS reference preprocessing (RMS auto-gain, silence trim,\n"
+            "hop truncation); the resulting .rvq feeds omnivoice-tts --ref-rvq directly.\n",
             prog);
-}
-
-// Pack a flat code stream into 11-bit-per-code, LSB-first. Output size is
-// ceil(N * 11 / 8) bytes.
-static std::vector<uint8_t> pack_codes(const std::vector<int32_t> & codes) {
-    const size_t         total_bits = codes.size() * (size_t) RVQ_CODE_BITS;
-    std::vector<uint8_t> out((total_bits + 7) / 8, 0);
-
-    uint64_t acc         = 0;
-    int      bits_in_acc = 0;
-    size_t   out_pos     = 0;
-    for (size_t i = 0; i < codes.size(); i++) {
-        acc |= ((uint64_t) ((uint32_t) codes[i] & RVQ_CODE_MASK)) << bits_in_acc;
-        bits_in_acc += RVQ_CODE_BITS;
-        while (bits_in_acc >= 8) {
-            out[out_pos++] = (uint8_t) (acc & 0xFF);
-            acc >>= 8;
-            bits_in_acc -= 8;
-        }
-    }
-    if (bits_in_acc > 0) {
-        out[out_pos++] = (uint8_t) (acc & 0xFF);
-    }
-    return out;
-}
-
-// Symmetric unpack: reads N codes from packed bytes.
-static std::vector<int32_t> unpack_codes(const std::vector<uint8_t> & in, size_t n_codes) {
-    std::vector<int32_t> out(n_codes);
-
-    uint64_t acc         = 0;
-    int      bits_in_acc = 0;
-    size_t   in_pos      = 0;
-    for (size_t i = 0; i < n_codes; i++) {
-        while (bits_in_acc < RVQ_CODE_BITS && in_pos < in.size()) {
-            acc |= ((uint64_t) in[in_pos++]) << bits_in_acc;
-            bits_in_acc += 8;
-        }
-        out[i] = (int32_t) (acc & RVQ_CODE_MASK);
-        acc >>= RVQ_CODE_BITS;
-        bits_in_acc -= RVQ_CODE_BITS;
-    }
-    return out;
-}
-
-// Read a .rvq file and unpack it into K*T codes. T is inferred from the file
-// size: T = (filesize * 8) / (K * RVQ_CODE_BITS).
-static bool read_rvq(const char * path, int K, std::vector<int32_t> & codes, int * n_frames) {
-    FILE * f = utf8_fopen(path, "rb");
-    if (!f) {
-        fprintf(stderr, "[RVQ] FATAL: cannot open %s\n", path);
-        return false;
-    }
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (sz <= 0) {
-        fprintf(stderr, "[RVQ] FATAL: %s is empty\n", path);
-        fclose(f);
-        return false;
-    }
-    std::vector<uint8_t> buf((size_t) sz);
-    if (fread(buf.data(), 1, buf.size(), f) != buf.size()) {
-        fprintf(stderr, "[RVQ] FATAL: short read on %s\n", path);
-        fclose(f);
-        return false;
-    }
-    fclose(f);
-
-    const size_t total_bits = (size_t) sz * 8;
-    const size_t n_codes    = total_bits / (size_t) RVQ_CODE_BITS;
-    if (n_codes == 0 || (n_codes % (size_t) K) != 0) {
-        fprintf(stderr, "[RVQ] FATAL: %s yields %zu codes, not a multiple of K=%d\n", path, n_codes, K);
-        return false;
-    }
-    codes     = unpack_codes(buf, n_codes);
-    *n_frames = (int) (n_codes / (size_t) K);
-    return true;
-}
-
-// Pack and write a .rvq file.
-static bool write_rvq(const char * path, const std::vector<int32_t> & codes) {
-    std::vector<uint8_t> packed = pack_codes(codes);
-    FILE *               f      = utf8_fopen(path, "wb");
-    if (!f) {
-        fprintf(stderr, "[RVQ] FATAL: cannot open %s for write\n", path);
-        return false;
-    }
-    if (fwrite(packed.data(), 1, packed.size(), f) != packed.size()) {
-        fprintf(stderr, "[RVQ] FATAL: short write on %s\n", path);
-        fclose(f);
-        return false;
-    }
-    fclose(f);
-    return true;
 }
 
 // Replace or append extension on a path string.
@@ -218,30 +131,44 @@ int main_impl(int argc, char ** argv) {
         float * audio     = audio_read_mono(input_path, 24000, &n_samples);
         if (!audio || n_samples <= 0) {
             fprintf(stderr, "[OmniVoice-Codec] FATAL: failed to load %s\n", input_path);
+            free(audio);
             rc = 1;
         } else {
             fprintf(stderr, "[OmniVoice-Codec] Encode: %s, %d samples @ 24 kHz mono (%.2f s)\n", input_path, n_samples,
                     (double) n_samples / 24000.0);
-            std::vector<int32_t> codes = pipeline_codec_encode(&pc, audio, n_samples);
+
+            // Strict conformance with the TTS --ref-wav path: RMS auto-gain,
+            // silence trim, then truncation to the hop boundary.
+            std::vector<float> buf(audio, audio + n_samples);
             free(audio);
-            if (codes.empty()) {
-                fprintf(stderr, "[OmniVoice-Codec] FATAL: encode failed\n");
-                rc = 1;
-            } else if (!write_rvq(out_str.c_str(), codes)) {
+            ref_preprocess_audio(buf, 24000, true);
+
+            int n_aligned = ((int) buf.size() / pc.hop_length) * pc.hop_length;
+            if (n_aligned <= 0) {
+                fprintf(stderr, "[OmniVoice-Codec] FATAL: input too short after preprocessing (%zu samples, hop %d)\n",
+                        buf.size(), pc.hop_length);
                 rc = 1;
             } else {
-                const int    K           = pc.rvq.num_codebooks;
-                const int    T           = (int) codes.size() / K;
-                const size_t packed_size = (codes.size() * (size_t) RVQ_CODE_BITS + 7) / 8;
-                fprintf(stderr, "[OmniVoice-Codec] Wrote %s: K=%d T=%d (%zu bytes)\n", out_str.c_str(), K, T,
-                        packed_size);
+                std::vector<int32_t> codes = pipeline_codec_encode(&pc, buf.data(), n_aligned);
+                if (codes.empty()) {
+                    fprintf(stderr, "[OmniVoice-Codec] FATAL: encode failed\n");
+                    rc = 1;
+                } else if (!rvq_write_file(out_str.c_str(), codes, RVQ_CODE_BITS)) {
+                    rc = 1;
+                } else {
+                    const int    K           = pc.rvq.num_codebooks;
+                    const int    T           = (int) codes.size() / K;
+                    const size_t packed_size = (codes.size() * (size_t) RVQ_CODE_BITS + 7) / 8;
+                    fprintf(stderr, "[OmniVoice-Codec] Wrote %s: K=%d T=%d (%zu bytes)\n", out_str.c_str(), K, T,
+                            packed_size);
+                }
             }
         }
     } else {
         const int            K = pc.rvq.num_codebooks;
         std::vector<int32_t> codes;
         int                  T = 0;
-        if (!read_rvq(input_path, K, codes, &T)) {
+        if (!rvq_read_file(input_path, K, RVQ_CODE_BITS, codes, &T)) {
             rc = 1;
         } else {
             fprintf(stderr, "[OmniVoice-Codec] Decode: %s, K=%d T=%d\n", input_path, K, T);

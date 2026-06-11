@@ -6,6 +6,8 @@
 // pipeline sample rate (24 kHz). Internal silence detection runs on int16
 // samples to match pydub bit-for-bit.
 
+#include "ov-error.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -270,6 +272,41 @@ static void remove_silence(std::vector<float> & a,
     std::reverse(s16.begin(), s16.end());
 
     a = postproc_s16_to_f32(s16);
+}
+
+// ref_preprocess_audio: reference waveform preprocessing shared by the TTS
+// reference path and the codec CLI encode path. Mirrors the upstream Python
+// chain: RMS measurement, auto-gain to RMS 0.1 when the original RMS sits
+// in (0, 0.1), then silence-trim with mid=200ms / lead=100ms / trail=200ms
+// at -50 dBFS when trim_silence is set. Returns the ORIGINAL RMS so the
+// TTS post-proc can rescale generated audio back to the reference
+// loudness; an empty buffer returns -1.
+static float ref_preprocess_audio(std::vector<float> & a, int sr, bool trim_silence) {
+    if (a.empty()) {
+        return -1.0f;
+    }
+
+    double sumsq = 0.0;
+    for (float v : a) {
+        sumsq += (double) v * (double) v;
+    }
+    double ref_rms = std::sqrt(sumsq / (double) a.size());
+
+    if (ref_rms > 0.0 && ref_rms < 0.1) {
+        float gain = (float) (0.1 / ref_rms);
+        for (float & v : a) {
+            v *= gain;
+        }
+        ov_log(OV_LOG_INFO, "[RefPrep] RMS %.4f -> 0.1 gain %.4f", ref_rms, gain);
+    }
+
+    if (trim_silence) {
+        size_t before = a.size();
+        remove_silence(a, sr, 200, 100, 200, -50.0);
+        ov_log(OV_LOG_INFO, "[RefPrep] silence-trim %zu -> %zu samples", before, a.size());
+    }
+
+    return (float) ref_rms;
 }
 
 // peak_normalize_half: rescale so peak amplitude becomes 0.5 (-6 dBFS).

@@ -337,4 +337,12 @@ int ov_duration_sec_to_tokens(const struct ov_context * ov, float duration_sec) 
     return pipeline_tts_duration_sec_to_tokens(&ov->pc, duration_sec);
 }
 
+int ov_num_codebooks(const struct ov_context * ov) {
+    if (!ov) {
+        ov_set_error("ov_num_codebooks: ov is NULL");
+        return 0;
+    }
+    return ov->pt.lm.num_audio_codebook;
+}
+
 }  // extern "C"

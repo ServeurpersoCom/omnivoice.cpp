@@ -64,6 +64,20 @@ Voice cloning :
     --lang English -o out.wav < prompt.txt
 ```
 
+Pre-encoded reference (`clone.sh`): `omnivoice-codec` encodes a reference WAV
+into a compact `.rvq` latent (it applies the exact TTS reference
+preprocessing, so the codes are bit-identical to the `--ref-wav` path).
+Passing it via `--ref-rvq` skips the codec encode on every synthesis:
+
+```
+build/omnivoice-codec --model models/omnivoice-tokenizer-F32.gguf -i ref.wav
+build/omnivoice-tts \
+    --model models/omnivoice-base-Q8_0.gguf \
+    --codec models/omnivoice-tokenizer-F32.gguf \
+    --ref-rvq ref.rvq --ref-text ref.txt \
+    --lang English -o out.wav < prompt.txt
+```
+
 ## Embedding the library
 
 The CLI tools are thin wrappers over a public ABI. Single-header,
