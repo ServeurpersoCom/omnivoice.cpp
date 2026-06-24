@@ -203,6 +203,7 @@ void ov_tts_default_params(struct ov_tts_params * p) {
     p->cancel_user_data        = nullptr;
     p->on_chunk                = nullptr;
     p->on_chunk_user_data      = nullptr;
+    p->postproc                = true;
 }
 
 struct ov_context * ov_init(const struct ov_init_params * params) {

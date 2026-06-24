@@ -54,7 +54,7 @@ extern "C" {
 // There is no separate semver triple. The runtime build identity is the
 // git short hash + commit date string returned by ov_version(); for
 // binding compat checks, OV_ABI_VERSION is the only number that matters.
-#define OV_ABI_VERSION 2
+#define OV_ABI_VERSION 3
 
 // Returns a static string of the form "<git-hash> (<date>)" identifying
 // the exact commit this binary was built from. Safe to call from any
@@ -236,12 +236,23 @@ struct ov_tts_params {
     // stays empty on success. on_chunk NULL keeps the buffered path.
     ov_audio_chunk_cb on_chunk;
     void *            on_chunk_user_data;
+
+    // Output post filtering toggle for the buffered path. true (default)
+    // keeps the reference behaviour: silence removal, per utterance peak
+    // normalisation when no reference is set, and edge fade plus padding.
+    // false returns the raw decode at exactly T_override * hop samples, so a
+    // caller assembling its own timeline onto fixed slots (dubbing) gets a
+    // predictable segment length and owns its own edge shaping. Reference
+    // loudness matching (ref_rms scaling) is part of voice cloning and runs
+    // either way. Tail field: kept last for ABI growth, read only when
+    // abi_version >= 3. The streaming path always post filters.
+    bool postproc;
 };
 
 // Initialise to the standard defaults. Strings NULL, T_override 0,
 // chunk_duration_sec 15, chunk_threshold_sec 30, denoise true,
 // preprocess_prompt true, MaskGIT defaults as above, every reference
-// pointer NULL, dump_dir NULL, cancel NULL.
+// pointer NULL, dump_dir NULL, cancel NULL, postproc true.
 OV_API void ov_tts_default_params(struct ov_tts_params * p);
 
 // Run the full TTS synthesis. Resolves the instruct against the bundled

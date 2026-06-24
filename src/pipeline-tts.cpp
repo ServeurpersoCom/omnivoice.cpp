@@ -758,6 +758,7 @@ static std::vector<float> tts_synthesize_long_internal(PipelineTTS *         pt,
                                                        float                 chunk_duration_sec,
                                                        float                 chunk_threshold_sec,
                                                        bool                  denoise,
+                                                       bool                  postproc,
                                                        const MaskgitConfig & mg_cfg,
                                                        const std::string &   ref_text,
                                                        const int32_t *       ext_ref_tokens,
@@ -920,16 +921,22 @@ static std::vector<float> tts_synthesize_long_internal(PipelineTTS *         pt,
         ov_log(OV_LOG_INFO, "[TTS-Long] Cross-faded %d chunks -> %zu samples", (int) chunk_audios.size(), audio.size());
     }
 
-    // Post-processing: matches _post_process_audio in omnivoice.py.
-    // remove_silence and fade_and_pad always run. The volume branch picks
-    // peak/0.5 when there is no reference (ref_rms < 0), or rescales by
-    // ref_rms / 0.1 for a quiet reference, or stays no-op for a loud one.
+    // Post filtering: remove_silence and fade_and_pad mirror
+    // _post_process_audio in omnivoice.py and run when postproc is set.
+    // peak_normalize_half is a per utterance normalisation, also gated so a
+    // timeline assembler can normalise once globally instead. The reference
+    // loudness branch (ref_rms scaling) is part of voice cloning and always
+    // runs. postproc false leaves the raw decode at exactly T * hop samples.
     size_t before = audio.size();
 
-    remove_silence(audio, sr, 500, 100, 100, -50.0);
+    if (postproc) {
+        remove_silence(audio, sr, 500, 100, 100, -50.0);
+    }
 
     if (ref_rms < 0.0f) {
-        peak_normalize_half(audio);
+        if (postproc) {
+            peak_normalize_half(audio);
+        }
     } else if (ref_rms < 0.1f) {
         float k = ref_rms / 0.1f;
         for (auto & s : audio) {
@@ -937,7 +944,9 @@ static std::vector<float> tts_synthesize_long_internal(PipelineTTS *         pt,
         }
     }
 
-    fade_and_pad(audio, sr, 0.1, 0.1);
+    if (postproc) {
+        fade_and_pad(audio, sr, 0.1, 0.1);
+    }
 
     ov_log(OV_LOG_INFO, "[TTS-Long] Post-proc: %zu -> %zu samples (%.2fs at %d Hz, ref_rms=%.4f)", before, audio.size(),
            (float) audio.size() / (float) sr, sr, ref_rms);
@@ -1395,9 +1404,19 @@ ov_status pipeline_tts_synthesize(PipelineTTS *         pt,
         return rc;
     }
 
-    std::vector<float> audio = tts_synthesize_long_internal(
-        pt, pc, tok, text, lang, instruct, params->T_override, params->chunk_duration_sec, params->chunk_threshold_sec,
-        params->denoise, mg_cfg, synth_ref_text, synth_ref_tokens, synth_ref_T, synth_ref_rms, params->dump_dir, &cc);
+    // Post filtering toggle. Tail field of ov_tts_params: only valid when
+    // the caller declares abi_version >= 3, older callers keep the reference
+    // behaviour (on). Threaded into the buffered path only, the streaming
+    // path always post filters.
+    bool postproc = true;
+    if (params->abi_version >= 3) {
+        postproc = params->postproc;
+    }
+
+    std::vector<float> audio =
+        tts_synthesize_long_internal(pt, pc, tok, text, lang, instruct, params->T_override, params->chunk_duration_sec,
+                                     params->chunk_threshold_sec, params->denoise, postproc, mg_cfg, synth_ref_text,
+                                     synth_ref_tokens, synth_ref_T, synth_ref_rms, params->dump_dir, &cc);
 
     if (cc.triggered) {
         ov_set_error("ov_synthesize : cancelled by ov_cancel_cb");
