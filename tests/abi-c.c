@@ -79,6 +79,9 @@ int main(void) {
     struct ov_audio audio = { 0 };
     ov_audio_free(&audio);
 
+    struct ov_voice_ref voice_ref = { 0 };
+    ov_voice_ref_free(&voice_ref);
+
     /* Install the log callback before the failing init so the [OmniVoice]
      * ERROR line lands on stub_log instead of stderr. */
     ov_log_set(stub_log, NULL);
@@ -144,6 +147,13 @@ int main(void) {
         return 4;
     }
 
+    enum ov_status vrc = ov_extract_voice_ref(NULL, NULL, 0, &voice_ref);
+    if (vrc != OV_STATUS_INVALID_PARAMS) {
+        fprintf(stderr, "[Probe] ov_extract_voice_ref(NULL) returned %d, expected %d\n", (int) vrc,
+                (int) OV_STATUS_INVALID_PARAMS);
+        return 9;
+    }
+
     /* Restore the default stderr fallback before exit so the trailing
      * [OmniVoice] log lines from the cleanup paths land where the user
      * expects them. */
@@ -151,6 +161,7 @@ int main(void) {
 
     ov_free(NULL);
     ov_audio_free(&audio);
+    ov_voice_ref_free(&voice_ref);
 
     return 0;
 }

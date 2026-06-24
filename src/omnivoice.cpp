@@ -10,6 +10,7 @@
 
 #include "omnivoice.h"
 
+#include "audio-postproc.h"
 #include "backend.h"
 #include "bpe.h"
 #include "ov-error.h"
@@ -23,8 +24,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <new>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 // Internal definition of the opaque handle. C++ types are fine here
 // because nothing in this struct ever crosses the public ABI boundary :
@@ -344,6 +347,95 @@ int ov_num_codebooks(const struct ov_context * ov) {
         return 0;
     }
     return ov->pt.lm.num_audio_codebook;
+}
+
+void ov_voice_ref_free(struct ov_voice_ref * ref) {
+    if (!ref) {
+        return;
+    }
+    if (ref->ref_codes) {
+        std::free(ref->ref_codes);
+    }
+    ref->ref_codes     = nullptr;
+    ref->ref_T         = 0;
+    ref->num_codebooks = 0;
+}
+
+enum ov_status ov_extract_voice_ref(struct ov_context *   ov,
+                                    const float *         ref_audio_24k,
+                                    int                   ref_n_samples,
+                                    struct ov_voice_ref * out) {
+    if (out) {
+        ov_voice_ref_free(out);
+    }
+    if (!ov || !ref_audio_24k || !out) {
+        ov_set_error("ov_extract_voice_ref: ov, ref_audio_24k or out is NULL");
+        return OV_STATUS_INVALID_PARAMS;
+    }
+    if (!ov->codec_loaded) {
+        ov_set_error("ov_extract_voice_ref: codec not loaded");
+        return OV_STATUS_GENERATE_FAILED;
+    }
+    if (ref_n_samples < ov->pc.hop_length) {
+        ov_set_error("ov_extract_voice_ref: ref_audio_24k too short for RVQ encode (%d samples, need at least %d)",
+                     ref_n_samples, ov->pc.hop_length);
+        return OV_STATUS_INVALID_PARAMS;
+    }
+
+    try {
+        // Match the omnivoice-codec CLI and the --ref-wav synth path:
+        // RMS auto-gain, silence trim, then truncation to the hop boundary.
+        std::vector<float> buf(ref_audio_24k, ref_audio_24k + ref_n_samples);
+        ref_preprocess_audio(buf, 24000, true);
+
+        const int n_aligned = ((int) buf.size() / ov->pc.hop_length) * ov->pc.hop_length;
+        if (n_aligned <= 0) {
+            ov_set_error("ov_extract_voice_ref: input too short after preprocessing (%zu samples, hop %d)", buf.size(),
+                         ov->pc.hop_length);
+            return OV_STATUS_INVALID_PARAMS;
+        }
+
+        std::vector<int32_t> codes = pipeline_codec_encode(&ov->pc, buf.data(), n_aligned);
+        if (codes.empty()) {
+            ov_set_error("ov_extract_voice_ref: pipeline_codec_encode returned empty codes");
+            return OV_STATUS_GENERATE_FAILED;
+        }
+
+        const int K = ov->pt.lm.num_audio_codebook;
+        if (K <= 0) {
+            ov_set_error("ov_extract_voice_ref: invalid codebook count %d", K);
+            return OV_STATUS_GENERATE_FAILED;
+        }
+        if ((codes.size() % (size_t) K) != 0) {
+            ov_set_error("ov_extract_voice_ref: encoded code count %zu is not divisible by %d", codes.size(), K);
+            return OV_STATUS_GENERATE_FAILED;
+        }
+
+        const size_t codes_bytes = codes.size() * sizeof(int32_t);
+        int32_t *    codes_copy  = (int32_t *) std::malloc(codes_bytes);
+        if (!codes_copy) {
+            ov_set_error("ov_extract_voice_ref: malloc failed for %zu code bytes", codes_bytes);
+            return OV_STATUS_OOM;
+        }
+        std::memcpy(codes_copy, codes.data(), codes_bytes);
+
+        out->ref_codes     = codes_copy;
+        out->ref_T         = (int) (codes.size() / (size_t) K);
+        out->num_codebooks = K;
+
+        ov_log(OV_LOG_INFO, "[OmniVoice] Extracted voice ref: K=%d T=%d (%d/%d samples)", out->num_codebooks,
+               out->ref_T, n_aligned, ref_n_samples);
+        return OV_STATUS_OK;
+    } catch (const std::bad_alloc &) {
+        ov_set_error("ov_extract_voice_ref: out of memory");
+        ov_voice_ref_free(out);
+        return OV_STATUS_OOM;
+    } catch (const std::exception & e) {
+        ov_set_error("%s", e.what());
+        ov_log(OV_LOG_ERROR, "[OmniVoice] %s", e.what());
+        ov_voice_ref_free(out);
+        return OV_STATUS_GENERATE_FAILED;
+    }
 }
 
 }  // extern "C"

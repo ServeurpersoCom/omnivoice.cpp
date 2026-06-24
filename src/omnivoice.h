@@ -274,6 +274,40 @@ OV_API int ov_duration_sec_to_tokens(const struct ov_context * ov, float duratio
 // code count. Returns 0 on a NULL handle.
 OV_API int ov_num_codebooks(const struct ov_context * ov);
 
+// Pre-encoded voice reference codes, the in-process equivalent of an
+// omnivoice-codec CLI encode. Plain POD: ref_codes is malloc allocated
+// by ov_extract_voice_ref, owned by the struct, released by
+// ov_voice_ref_free. Do not free the pointer directly nor reassign
+// without freeing first. Zero initialise before first use:
+// `struct ov_voice_ref ref = {0};`.
+//
+// ref_codes is the RVQ code matrix equivalent to a raw .rvq file, laid
+// out [num_codebooks, ref_T] row-major (T fastest), ready to feed back
+// through ov_tts_params.ref_audio_tokens / ref_T.
+struct ov_voice_ref {
+    int32_t * ref_codes;
+    int       ref_T;
+    int       num_codebooks;
+};
+
+// Extract reusable voice-clone codes from a decoded reference audio
+// buffer: mono float32 PCM at 24 kHz. Requires a codec-loaded handle.
+// Applies the same preprocessing as the omnivoice-codec CLI and the
+// --ref-wav synth path (RMS auto-gain, silence trim, hop truncation),
+// so the codes are bit-identical to both and round-trip directly through
+// ov_tts_params.ref_audio_tokens.
+//
+// On success fills out with a malloc-owned buffer. On failure leaves out
+// empty and stores a diagnostic in ov_last_error().
+OV_API enum ov_status ov_extract_voice_ref(struct ov_context *   ov,
+                                           const float *         ref_audio_24k,
+                                           int                   ref_n_samples,
+                                           struct ov_voice_ref * out);
+
+// Release the RVQ code buffer and reset the struct to empty. Safe on a
+// zero initialised struct.
+OV_API void ov_voice_ref_free(struct ov_voice_ref * ref);
+
 #ifdef __cplusplus
 }
 #endif
