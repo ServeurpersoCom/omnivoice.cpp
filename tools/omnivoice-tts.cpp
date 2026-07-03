@@ -71,6 +71,7 @@ static void print_usage(const char * prog) {
             "  --ref-text <path>       Transcript file for the reference (required with --ref-wav / --ref-rvq)\n"
             "  --ref-rvq <path>        Pre-encoded reference codes from omnivoice-codec (replaces --ref-wav)\n"
             "  --seed <int>            Sampling seed (default: -1 for random)\n"
+            "  --steps <int>           MaskGIT decode steps (default: 32, fewer is faster)\n"
             "  --no-preprocess-prompt  Skip ref-wav silence trim and ref-text terminal punctuation\n"
             "  --chunk-duration <sec>  Long-form chunk duration (default: 15.0, <= 0 disables chunking)\n"
             "  --chunk-threshold <sec> Activate chunking above this estimated duration (default: 30.0)\n"
@@ -233,6 +234,7 @@ static int run_srt_dub(ov_context *                 ov,
                        const char *                 prompt_instruct,
                        bool                         prompt_denoise,
                        bool                         preprocess_prompt,
+                       int                          mg_steps,
                        uint64_t                     seed_resolved,
                        const char *                 dump_dir,
                        const char *                 output_path,
@@ -287,12 +289,15 @@ static int run_srt_dub(ov_context *                 ov,
         p.preprocess_prompt = preprocess_prompt;
         p.postproc          = false;
         p.mg_seed           = seed_resolved;
-        p.ref_audio_24k     = ref_audio.empty() ? nullptr : ref_audio.data();
-        p.ref_n_samples     = (int) ref_audio.size();
-        p.ref_audio_tokens  = ref_tokens.empty() ? nullptr : ref_tokens.data();
-        p.ref_T             = ref_T;
-        p.ref_text          = ref_text.c_str();
-        p.dump_dir          = dump_dir;
+        if (mg_steps > 0) {
+            p.mg_num_step = mg_steps;
+        }
+        p.ref_audio_24k    = ref_audio.empty() ? nullptr : ref_audio.data();
+        p.ref_n_samples    = (int) ref_audio.size();
+        p.ref_audio_tokens = ref_tokens.empty() ? nullptr : ref_tokens.data();
+        p.ref_T            = ref_T;
+        p.ref_text         = ref_text.c_str();
+        p.dump_dir         = dump_dir;
 
         ov_audio seg = {};
         if (ov_synthesize(ov, &p, &seg) != OV_STATUS_OK) {
@@ -381,6 +386,7 @@ static int run_tts_via_ov(const char * model_path,
                           float        chunk_threshold_sec,
                           bool         stream_by_line,
                           const char * srt_path,
+                          int          mg_steps,
                           uint64_t     seed_resolved,
                           const char * dump_dir,
                           const char * output_path,
@@ -444,7 +450,7 @@ static int run_tts_via_ov(const char * model_path,
     // streaming and buffered paths below.
     if (srt_path) {
         rc = run_srt_dub(ov, srt_path, ref_audio, ref_tokens, ref_T, ref_text, lang, prompt_instruct, prompt_denoise,
-                         preprocess_prompt, seed_resolved, dump_dir, output_path, wav_fmt);
+                         preprocess_prompt, mg_steps, seed_resolved, dump_dir, output_path, wav_fmt);
         ov_free(ov);
         return rc;
     }
@@ -520,13 +526,16 @@ static int run_tts_via_ov(const char * model_path,
             params.denoise             = prompt_denoise;
             params.preprocess_prompt   = preprocess_prompt;
             params.mg_seed             = seed_resolved;
-            params.ref_audio_24k       = ref_audio.empty() ? nullptr : ref_audio.data();
-            params.ref_n_samples       = (int) ref_audio.size();
-            params.ref_audio_tokens    = ref_tokens.empty() ? nullptr : ref_tokens.data();
-            params.ref_T               = ref_T;
-            params.ref_text            = ref_text.c_str();
-            params.dump_dir            = dump_dir;
-            params.on_chunk            = [](const float * s, int n, void * ud) -> bool {
+            if (mg_steps > 0) {
+                params.mg_num_step = mg_steps;
+            }
+            params.ref_audio_24k    = ref_audio.empty() ? nullptr : ref_audio.data();
+            params.ref_n_samples    = (int) ref_audio.size();
+            params.ref_audio_tokens = ref_tokens.empty() ? nullptr : ref_tokens.data();
+            params.ref_T            = ref_T;
+            params.ref_text         = ref_text.c_str();
+            params.dump_dir         = dump_dir;
+            params.on_chunk         = [](const float * s, int n, void * ud) -> bool {
                 return wav_stream_write((wav_stream *) ud, s, n);
             };
             params.on_chunk_user_data = &ws;
@@ -625,12 +634,15 @@ static int run_tts_via_ov(const char * model_path,
     params.denoise             = prompt_denoise;
     params.preprocess_prompt   = preprocess_prompt;
     params.mg_seed             = seed_resolved;
-    params.ref_audio_24k       = ref_audio.empty() ? nullptr : ref_audio.data();
-    params.ref_n_samples       = (int) ref_audio.size();
-    params.ref_audio_tokens    = ref_tokens.empty() ? nullptr : ref_tokens.data();
-    params.ref_T               = ref_T;
-    params.ref_text            = ref_text.c_str();
-    params.dump_dir            = dump_dir;
+    if (mg_steps > 0) {
+        params.mg_num_step = mg_steps;
+    }
+    params.ref_audio_24k    = ref_audio.empty() ? nullptr : ref_audio.data();
+    params.ref_n_samples    = (int) ref_audio.size();
+    params.ref_audio_tokens = ref_tokens.empty() ? nullptr : ref_tokens.data();
+    params.ref_T            = ref_T;
+    params.ref_text         = ref_text.c_str();
+    params.dump_dir         = dump_dir;
 
     ov_audio audio = {};
     if (ov_synthesize(ov, &params, &audio) != OV_STATUS_OK) {
@@ -676,6 +688,7 @@ static int main_impl(int argc, char ** argv) {
     bool         use_fa                 = true;
     bool         clamp_fp16             = false;
     int          seed_arg               = -1;
+    int          mg_steps               = 0;
     const char * dump_dir               = NULL;
     WavFormat    wav_fmt                = WAV_S16;
 
@@ -718,6 +731,12 @@ static int main_impl(int argc, char ** argv) {
             ref_text_path = argv[++i];
         } else if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
             seed_arg = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--steps") == 0 && i + 1 < argc) {
+            mg_steps = atoi(argv[++i]);
+            if (mg_steps < 1) {
+                fprintf(stderr, "[CLI] ERROR: --steps must be >= 1\n");
+                return 1;
+            }
         } else if (strcmp(argv[i], "--dump") == 0 && i + 1 < argc) {
             dump_dir = argv[++i];
         } else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
@@ -799,8 +818,8 @@ static int main_impl(int argc, char ** argv) {
     if (tts_mode) {
         return run_tts_via_ov(model_path, codec_path, use_fa, clamp_fp16, ref_wav_path, ref_rvq_path, ref_text_path,
                               prompt_lang, prompt_instruct, prompt_duration_sec, prompt_denoise, preprocess_prompt,
-                              chunk_duration_sec, chunk_threshold_sec, stream_by_line, srt_path, seed_resolved,
-                              dump_dir, output_path, wav_fmt);
+                              chunk_duration_sec, chunk_threshold_sec, stream_by_line, srt_path, mg_steps,
+                              seed_resolved, dump_dir, output_path, wav_fmt);
     }
 
     BackendPair bp = backend_init("LM");
@@ -846,6 +865,9 @@ static int main_impl(int argc, char ** argv) {
             mg_cfg.class_temperature    = 0.0f;
             mg_cfg.position_temperature = 0.0f;
             mg_cfg.seed                 = seed_resolved;
+            if (mg_steps > 0) {
+                mg_cfg.num_step = mg_steps;
+            }
 
             std::string text         = read_stdin_text();
             std::string lang         = prompt_lang ? prompt_lang : "";
