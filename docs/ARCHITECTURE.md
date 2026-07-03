@@ -720,6 +720,8 @@ Optional:
   --format <fmt>          WAV output format: wav16, wav24, wav32 (default: wav16)
 
 Output is auto-named next to input : clip.wav -> clip.rvq, clip.rvq -> clip.wav.
+Encode applies the TTS reference preprocessing (RMS auto-gain, silence trim,
+hop truncation); the resulting .rvq feeds omnivoice-tts --ref-rvq directly.
 ```
 
 The `.rvq` file is a small binary container with shape `[8, T]` int32
