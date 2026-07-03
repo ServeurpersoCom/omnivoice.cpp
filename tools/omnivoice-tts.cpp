@@ -85,20 +85,26 @@ static void print_usage(const char * prog) {
             prog);
 }
 
-// Read all of stdin into a string. Trims trailing newlines so the prompt
-// matches what a user typed without invisible suffix tokens. Used by the
-// non-streaming code paths (debug dumps).
+// Read all of stdin into a string. Binary mode on Windows so UTF-16 input
+// survives CRLF translation, then normalised to UTF-8. Trims trailing
+// newlines so the prompt matches what a user typed without invisible
+// suffix tokens. Used by the non-streaming code paths (debug dumps).
 static std::string read_stdin_text() {
+#if defined(_WIN32)
+    _setmode(_fileno(stdin), _O_BINARY);
+#endif
     std::ostringstream ss;
     ss << std::cin.rdbuf();
     std::string s = ss.str();
+    utf8_normalize(s);
     while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) {
         s.pop_back();
     }
     return s;
 }
 
-// Read a small text file (transcript) into a string. Trims trailing newlines.
+// Read a small text file (transcript) into a string, normalised to UTF-8.
+// Trims trailing newlines.
 static bool read_text_file(const char * path, std::string & out) {
     FILE * f = utf8_fopen(path, "rb");
     if (!f) {
@@ -118,6 +124,7 @@ static bool read_text_file(const char * path, std::string & out) {
         return false;
     }
     fclose(f);
+    utf8_normalize(out);
     while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) {
         out.pop_back();
     }
