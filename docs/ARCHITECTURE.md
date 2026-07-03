@@ -258,7 +258,7 @@ drift of the PyTorch reference.
 
 #### Inner-loop optimisations
 
-The 32 steps of one chunk run on a fixed shape (`S`, `K`, `B'`) so
+The num_step iterations of one chunk run on a fixed shape (`S`, `K`, `B'`) so
 the per-step overhead can be cut without touching the math.
 
 `pipeline_tts_llm_forward_batched` accepts a `T_audio` parameter that
@@ -274,7 +274,7 @@ When `T_audio == 0` the function falls back to the full output, used
 by the debug dump path that needs every position.
 
 `MaskgitBatchedCtx` holds the inputs that stay constant across the
-32 steps : the F32 audio mask and its complement, the RoPE position
+steps : the F32 audio mask and its complement, the RoPE position
 vector, and the F16 attention bias. The bias is the heaviest piece,
 `B' * S * S` F16 conversions per step (about 7 M ops on the typical
 shape). `pipeline_tts_llm_batched_ctx_init` precomputes the bias once
@@ -675,6 +675,9 @@ Input:
                           incrementally and synthesis starts as soon as the first
                           sentence boundary is reached. With -o file.wav, stdin is
                           read fully then synthesised in one shot.
+  --srt <path>            Dub an SRT: synth each cue into its time slot, write one
+                          timeline WAV ready to mux. Pairs with --ref-wav / --ref-rvq
+                          for a cloned voice. Per cue duration comes from the SRT.
 
 Optional:
   --format <fmt>          WAV output format: wav16, wav24, wav32 (default: wav16)
@@ -683,8 +686,10 @@ Optional:
   --duration <sec>        Output duration in seconds (default: estimate from text)
   --no-denoise            Omit the <|denoise|> prefix
   --ref-wav <path>        Reference WAV for voice cloning
-  --ref-text <path>       Transcript file for the reference (required with --ref-wav)
+  --ref-text <path>       Transcript file for the reference (required with --ref-wav / --ref-rvq)
+  --ref-rvq <path>        Pre-encoded reference codes from omnivoice-codec (replaces --ref-wav)
   --seed <int>            Sampling seed (default: -1 for random)
+  --steps <int>           MaskGIT decode steps (default: 32, fewer is faster)
   --no-preprocess-prompt  Skip ref-wav silence trim and ref-text terminal punctuation
   --chunk-duration <sec>  Long-form chunk duration (default: 15.0, <= 0 disables chunking)
   --chunk-threshold <sec> Activate chunking above this estimated duration (default: 30.0)
@@ -755,9 +760,9 @@ src/
   omnivoice-llm.h      OmniVoice TTS LLM weights and graph helpers
   prompt-tts.h         Prompt builder (denoise + lang + instruct + text +
                        ref + mask) and CFG batch stacking
-  maskgit-tts.h        Iterative non autoregressive decoder, 32 steps,
-                       CFG, layer penalty, gumbel sampling, deterministic
-                       in greedy mode
+  maskgit-tts.h        Iterative non autoregressive decoder, configurable
+                       step count (32 default), CFG, layer penalty, gumbel
+                       sampling, deterministic in greedy mode
 
   pipeline-codec.{h,cpp} Audio tokenizer end-to-end (encode and decode)
   pipeline-tts.{h,cpp}   Full TTS orchestration, single shot and chunked,
