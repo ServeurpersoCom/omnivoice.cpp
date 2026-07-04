@@ -57,6 +57,11 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
 endif()
 
 # ggml as subdirectory, inherits GGML_CUDA, GGML_METAL, etc. from cmake flags
+# CUDA graphs default on: standalone ggml ships them off. Overridable with
+# -DGGML_CUDA_GRAPHS=OFF or at runtime with GGML_CUDA_DISABLE_GRAPHS=1.
+if(NOT DEFINED GGML_CUDA_GRAPHS)
+    set(GGML_CUDA_GRAPHS_DEFAULT ON)
+endif()
 add_subdirectory(ggml)
 
 # cpp-httplib (HTTP server library, no SSL, behind reverse proxy in prod).
