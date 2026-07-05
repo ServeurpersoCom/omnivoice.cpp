@@ -13,6 +13,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <random>
 #include <string>
 
 static void print_usage(const char * prog) {
@@ -106,6 +107,11 @@ int main(int argc, char ** argv) {
         if (!req.instructions.empty()) {
             p.instruct = req.instructions.c_str();
         }
+
+        // Seed resolution mirrors the CLI: negative or absent draws a
+        // fresh hardware random seed, anything else lands verbatim on
+        // the MaskGIT sampler for reproducible output.
+        p.mg_seed = (req.seed < 0) ? (uint64_t) std::random_device{}() : (uint64_t) req.seed;
 
         // Trampoline : the C ABI on_chunk forwards to the C++ sink.
         const tts_sink * sink_ptr = &sink;
