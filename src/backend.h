@@ -67,7 +67,37 @@ static ggml_backend_t cpu_backend_new(int n_threads) {
 // Subsequent calls reuse the same backend (single VMM pool). Returns a
 // BackendPair with .backend == NULL when initialisation fails; the caller
 // must check this before passing it to any pipeline_*_load.
+// Collapse exact consecutive duplicate ggml log lines and report the total
+// count when the run ends (tames the CUDA graph capture "reused" flood).
+static void ov_ggml_log(enum ggml_log_level level, const char * text, void * user_data) {
+    (void) level;
+    (void) user_data;
+    static char last[256] = { 0 };
+    static int  count     = 0;
+
+    if (count > 0 && strcmp(text, last) == 0) {
+        count++;
+        return;
+    }
+
+    if (count > 1) {
+        fprintf(stderr, "[Dedup] Previous line repeated %d times total\n", count);
+    }
+
+    fputs(text, stderr);
+    strncpy(last, text, sizeof(last) - 1);
+    last[sizeof(last) - 1] = 0;
+    count                  = 1;
+    fflush(stderr);
+}
+
 static BackendPair backend_init(const char * label) {
+    static bool log_installed = false;
+    if (!log_installed) {
+        ggml_log_set(ov_ggml_log, nullptr);
+        log_installed = true;
+    }
+
     if (g_backend_refs > 0) {
         g_backend_refs++;
         ov_log(OV_LOG_INFO, "[Load] %s backend: %s (shared)", label, ggml_backend_name(g_backend_cache.backend));
