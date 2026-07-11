@@ -361,17 +361,162 @@ void pipeline_tts_llm_batched_ctx_init(MaskgitBatchedCtx * ctx,
     }
 }
 
+// Build the static batched LM graph for one shape and allocate it once through
+// the scheduler. A prior graph of a different shape is torn down first. The
+// inputs stay unset here: the replay uploads them before every compute.
+static bool lm_batched_graph_build(PipelineTTS * pt, MaskgitBatchedCtx * ctx, int K, int T_audio) {
+    const Qwen3Config & cfg     = pt->lm.cfg;
+    const int           V       = pt->lm.audio_vocab_size;
+    const int           H       = cfg.hidden_size;
+    const int           B_prime = ctx->B_prime;
+    const int           S       = ctx->S;
+
+    if (ctx->lm_gctx) {
+        ggml_backend_sched_reset(pt->sched);
+        ggml_free(ctx->lm_gctx);
+        ctx->lm_gctx = nullptr;
+    }
+    // Node budget: custom embed ~30, 28L stack ~850 (4D adds a few reshape
+    // nodes per layer), audio_heads + reshape ~5. 8192 stays comfortable.
+    const int    n_max_nodes    = 8192;
+    const size_t graph_ctx_size = ggml_tensor_overhead() * n_max_nodes + ggml_graph_overhead_custom(n_max_nodes, false);
+
+    struct ggml_init_params gp   = { graph_ctx_size, NULL, /*no_alloc=*/true };
+    struct ggml_context *   gctx = ggml_init(gp);
+    if (!gctx) {
+        return false;
+    }
+
+    struct ggml_tensor * t_text_ids = ggml_new_tensor_1d(gctx, GGML_TYPE_I32, B_prime * S);
+    ggml_set_name(t_text_ids, "text_ids");
+    ggml_set_input(t_text_ids);
+
+    struct ggml_tensor * t_shifted = ggml_new_tensor_2d(gctx, GGML_TYPE_I32, B_prime * S, K);
+    ggml_set_name(t_shifted, "shifted_ids");
+    ggml_set_input(t_shifted);
+
+    // [1, S, B_prime] so multiplying with hidden states [H, S, B_prime]
+    // broadcasts on H (dim 0) and matches per (s, b).
+    struct ggml_tensor * t_mask = ggml_new_tensor_3d(gctx, GGML_TYPE_F32, 1, S, B_prime);
+    ggml_set_name(t_mask, "mask");
+    ggml_set_input(t_mask);
+
+    struct ggml_tensor * t_inv_mask = ggml_new_tensor_3d(gctx, GGML_TYPE_F32, 1, S, B_prime);
+    ggml_set_name(t_inv_mask, "inv_mask");
+    ggml_set_input(t_inv_mask);
+
+    // RoPE positions are 0..S-1, identical for cond and uncond rows.
+    struct ggml_tensor * t_positions = ggml_new_tensor_1d(gctx, GGML_TYPE_I32, S);
+    ggml_set_name(t_positions, "positions");
+    ggml_set_input(t_positions);
+
+    // Per-row attention bias. flash_attn_ext expects mask [n_kv, n_batch, ne32, ne33]
+    // with n_head broadcast through ne32 and the outer batch through ne33. Layout
+    // [S, S, 1, B_prime]: skv fast, sq mid, head broadcast, batch on the slowest.
+    struct ggml_tensor * t_attn = NULL;
+    if (ctx->has_attn_mask) {
+        t_attn = ggml_new_tensor_4d(gctx, GGML_TYPE_F16, S, S, 1, B_prime);
+        ggml_set_name(t_attn, "attn_mask");
+        ggml_set_input(t_attn);
+    }
+    // Custom embed. The flat get_rows runs on a B_prime * S row index buffer
+    // and produces [H, B_prime * S] which we promote to [H, S, B_prime] before
+    // the multiply broadcast and the stack.
+    struct ggml_tensor * text_embeds_flat  = ggml_get_rows(gctx, pt->lm.embed_tokens, t_text_ids);
+    struct ggml_tensor * audio_embeds_flat = NULL;
+    for (int k = 0; k < K; k++) {
+        struct ggml_tensor * idx_k =
+            ggml_view_1d(gctx, t_shifted, B_prime * S, (size_t) k * (size_t) (B_prime * S) * sizeof(int32_t));
+        struct ggml_tensor * emb_k = ggml_get_rows(gctx, pt->lm.audio_embeddings, idx_k);
+        audio_embeds_flat          = (k == 0) ? emb_k : ggml_add(gctx, audio_embeds_flat, emb_k);
+    }
+    struct ggml_tensor * text_embeds   = ggml_reshape_3d(gctx, text_embeds_flat, H, S, B_prime);
+    struct ggml_tensor * audio_embeds  = ggml_reshape_3d(gctx, audio_embeds_flat, H, S, B_prime);
+    struct ggml_tensor * text_branch   = ggml_mul(gctx, text_embeds, t_inv_mask);
+    struct ggml_tensor * audio_branch  = ggml_mul(gctx, audio_embeds, t_mask);
+    struct ggml_tensor * inputs_embeds = ggml_add(gctx, text_branch, audio_branch);
+
+    // 28L Qwen3 stack with B = B_prime, mask carried per-row.
+    struct ggml_tensor * hidden =
+        qwen3_build_layers(gctx, cfg, pt->lm.layers, pt->lm.final_norm, inputs_embeds, t_positions, t_attn, S,
+                           pt->use_flash_attn, pt->clamp_fp16, nullptr, nullptr, -1, nullptr, B_prime);
+
+    // audio_heads readout. hidden is [H, S, B_prime], audio_heads is [H, V*K],
+    // mul_mat returns [V*K, S, B_prime] which we reshape to [V, K, S, B_prime].
+    // Linear memory order [B_prime, S, K, V] matches the per-item layout the
+    // single forward returns (V*K*S floats per row, B' rows stacked), so the
+    // MaskGIT decoder reads it without further reshuffle.
+    struct ggml_tensor * logits_flat = ggml_mul_mat(gctx, pt->lm.audio_heads, hidden);
+    struct ggml_tensor * logits      = ggml_reshape_4d(gctx, logits_flat, V, K, S, B_prime);
+    ggml_set_name(logits, "audio_logits");
+
+    // Audio truncation: with T_audio > 0 the decoder only reads the audio
+    // window on cond row 0 (range [S - T_audio, S)) and uncond row 1 (range
+    // [0, T_audio)). Cutting these views before set_output shrinks the
+    // GPU->CPU transfer to 2 * V * K * T_audio floats. Math is identical.
+    struct ggml_tensor * cond_audio   = nullptr;
+    struct ggml_tensor * uncond_audio = nullptr;
+    if (T_audio > 0) {
+        size_t               cond_offset = (size_t) (S - T_audio) * logits->nb[2] + (size_t) 0 * logits->nb[3];
+        struct ggml_tensor * cond_view =
+            ggml_view_4d(gctx, logits, V, K, T_audio, 1, logits->nb[1], logits->nb[2], logits->nb[3], cond_offset);
+        cond_audio = ggml_cont(gctx, cond_view);
+        ggml_set_name(cond_audio, "cond_audio_logits");
+        ggml_set_output(cond_audio);
+
+        size_t               uncond_offset = (size_t) 0 * logits->nb[2] + (size_t) 1 * logits->nb[3];
+        struct ggml_tensor * uncond_view =
+            ggml_view_4d(gctx, logits, V, K, T_audio, 1, logits->nb[1], logits->nb[2], logits->nb[3], uncond_offset);
+        uncond_audio = ggml_cont(gctx, uncond_view);
+        ggml_set_name(uncond_audio, "uncond_audio_logits");
+        ggml_set_output(uncond_audio);
+    } else {
+        ggml_set_output(logits);
+    }
+
+    struct ggml_cgraph * graph = ggml_new_graph_custom(gctx, n_max_nodes, false);
+    if (T_audio > 0) {
+        ggml_build_forward_expand(graph, cond_audio);
+        ggml_build_forward_expand(graph, uncond_audio);
+    } else {
+        ggml_build_forward_expand(graph, logits);
+    }
+    ggml_backend_sched_reset(pt->sched);
+    if (!ggml_backend_sched_alloc_graph(pt->sched, graph)) {
+        ov_log(OV_LOG_ERROR, "[LM-Forward-Batched] sched_alloc_graph failed (B'=%d K=%d S=%d)", B_prime, K, S);
+        ggml_free(gctx);
+        return false;
+    }
+
+    ctx->lm_gctx         = gctx;
+    ctx->lm_gf           = graph;
+    ctx->lm_text_ids     = t_text_ids;
+    ctx->lm_shifted      = t_shifted;
+    ctx->lm_mask         = t_mask;
+    ctx->lm_inv_mask     = t_inv_mask;
+    ctx->lm_positions    = t_positions;
+    ctx->lm_attn         = t_attn;
+    ctx->lm_cond_audio   = cond_audio;
+    ctx->lm_uncond_audio = uncond_audio;
+    ctx->lm_logits       = logits;
+    ctx->lm_key_K        = K;
+    ctx->lm_key_T_audio  = T_audio;
+    ctx->lm_built        = true;
+    return true;
+}
+
 // Batched LLM forward: single graph that fuses B' independent forwards on the
 // trailing batch dim. Used for the cond + uncond CFG batching where row 0 is
 // the cond row and row 1 is the uncond row, both running on the same S window.
-// Pre-computed buffers (mask_f, inv_mask_f, positions, attn_f16) come from
-// the ctx, shared across the 32 MaskGIT steps of a chunk.
-std::vector<float> pipeline_tts_llm_forward_batched(PipelineTTS *             pt,
-                                                    const int32_t *           input_ids,
-                                                    const MaskgitBatchedCtx * ctx,
-                                                    int                       K,
-                                                    int                       T_audio,
-                                                    const char *              dump_hidden_dir) {
+// The static graph is built once per shape and replayed with a fresh input_ids
+// upload per step. Pre-computed buffers (mask_f, inv_mask_f, positions,
+// attn_f16) come from the ctx, shared across the 32 MaskGIT steps of a chunk.
+std::vector<float> pipeline_tts_llm_forward_batched(PipelineTTS *       pt,
+                                                    const int32_t *     input_ids,
+                                                    MaskgitBatchedCtx * ctx,
+                                                    int                 K,
+                                                    int                 T_audio,
+                                                    const char *        dump_hidden_dir) {
     if (!ctx) {
         ov_log(OV_LOG_ERROR, "[LM-Forward-Batched] ctx is NULL");
         return {};
@@ -424,9 +569,7 @@ std::vector<float> pipeline_tts_llm_forward_batched(PipelineTTS *             pt
         return out;
     }
 
-    const Qwen3Config & cfg = pt->lm.cfg;
-    const int           V   = pt->lm.audio_vocab_size;
-    const int           H   = cfg.hidden_size;
+    const int V = pt->lm.audio_vocab_size;
 
     // CPU pre-compute that depends on input_ids (mutates between MaskGIT
     // steps via the demask injection). Layouts :
@@ -445,138 +588,35 @@ std::vector<float> pipeline_tts_llm_forward_batched(PipelineTTS *             pt
         }
     }
 
-    // Node budget: custom embed ~30, 28L stack ~850 (4D adds a few reshape
-    // nodes per layer), audio_heads + reshape ~5. 8192 stays comfortable.
-    const int    n_max_nodes    = 8192;
-    const size_t graph_ctx_size = ggml_tensor_overhead() * n_max_nodes + ggml_graph_overhead_custom(n_max_nodes, false);
-
-    struct ggml_init_params gp   = { graph_ctx_size, NULL, /*no_alloc=*/true };
-    struct ggml_context *   gctx = ggml_init(gp);
-    if (!gctx) {
-        return {};
+    // Build the static graph once per shape. Within a request B', K, S, T_audio
+    // and the mask presence stay constant, so this fires at the first step and
+    // the rest replay against the same allocation.
+    if (!ctx->lm_built || ctx->lm_key_K != K || ctx->lm_key_T_audio != T_audio) {
+        if (!lm_batched_graph_build(pt, ctx, K, T_audio)) {
+            return {};
+        }
     }
 
-    struct ggml_tensor * t_text_ids = ggml_new_tensor_1d(gctx, GGML_TYPE_I32, B_prime * S);
-    ggml_set_name(t_text_ids, "text_ids");
-    ggml_set_input(t_text_ids);
-
-    struct ggml_tensor * t_shifted = ggml_new_tensor_2d(gctx, GGML_TYPE_I32, B_prime * S, K);
-    ggml_set_name(t_shifted, "shifted_ids");
-    ggml_set_input(t_shifted);
-
-    // [1, S, B_prime] so multiplying with hidden states [H, S, B_prime]
-    // broadcasts on H (dim 0) and matches per (s, b).
-    struct ggml_tensor * t_mask = ggml_new_tensor_3d(gctx, GGML_TYPE_F32, 1, S, B_prime);
-    ggml_set_name(t_mask, "mask");
-    ggml_set_input(t_mask);
-
-    struct ggml_tensor * t_inv_mask = ggml_new_tensor_3d(gctx, GGML_TYPE_F32, 1, S, B_prime);
-    ggml_set_name(t_inv_mask, "inv_mask");
-    ggml_set_input(t_inv_mask);
-
-    // RoPE positions are 0..S-1, identical for cond and uncond rows.
-    struct ggml_tensor * t_positions = ggml_new_tensor_1d(gctx, GGML_TYPE_I32, S);
-    ggml_set_name(t_positions, "positions");
-    ggml_set_input(t_positions);
-
-    // Per-row attention bias. flash_attn_ext expects mask [n_kv, n_batch, ne32, ne33]
-    // with n_head broadcast through ne32 and the outer batch through ne33. Layout
-    // [S, S, 1, B_prime]: skv fast, sq mid, head broadcast, batch on the slowest.
-    struct ggml_tensor * t_attn = NULL;
-    if (ctx->has_attn_mask) {
-        t_attn = ggml_new_tensor_4d(gctx, GGML_TYPE_F16, S, S, 1, B_prime);
-        ggml_set_name(t_attn, "attn_mask");
-        ggml_set_input(t_attn);
-    }
-
-    // Custom embed. The flat get_rows runs on a B_prime * S row index buffer
-    // and produces [H, B_prime * S] which we promote to [H, S, B_prime] before
-    // the multiply broadcast and the stack.
-    struct ggml_tensor * text_embeds_flat  = ggml_get_rows(gctx, pt->lm.embed_tokens, t_text_ids);
-    struct ggml_tensor * audio_embeds_flat = NULL;
-    for (int k = 0; k < K; k++) {
-        struct ggml_tensor * idx_k =
-            ggml_view_1d(gctx, t_shifted, B_prime * S, (size_t) k * (size_t) (B_prime * S) * sizeof(int32_t));
-        struct ggml_tensor * emb_k = ggml_get_rows(gctx, pt->lm.audio_embeddings, idx_k);
-        audio_embeds_flat          = (k == 0) ? emb_k : ggml_add(gctx, audio_embeds_flat, emb_k);
-    }
-    struct ggml_tensor * text_embeds   = ggml_reshape_3d(gctx, text_embeds_flat, H, S, B_prime);
-    struct ggml_tensor * audio_embeds  = ggml_reshape_3d(gctx, audio_embeds_flat, H, S, B_prime);
-    struct ggml_tensor * text_branch   = ggml_mul(gctx, text_embeds, t_inv_mask);
-    struct ggml_tensor * audio_branch  = ggml_mul(gctx, audio_embeds, t_mask);
-    struct ggml_tensor * inputs_embeds = ggml_add(gctx, text_branch, audio_branch);
-
-    // 28L Qwen3 stack with B = B_prime, mask carried per-row.
-    struct ggml_tensor * hidden =
-        qwen3_build_layers(gctx, cfg, pt->lm.layers, pt->lm.final_norm, inputs_embeds, t_positions, t_attn, S,
-                           pt->use_flash_attn, pt->clamp_fp16, nullptr, nullptr, -1, nullptr, B_prime);
-
-    // audio_heads readout. hidden is [H, S, B_prime], audio_heads is [H, V*K],
-    // mul_mat returns [V*K, S, B_prime] which we reshape to [V, K, S, B_prime].
-    // Linear memory order [B_prime, S, K, V] matches the per-item layout the
-    // single forward returns (V*K*S floats per row, B' rows stacked), so the
-    // MaskGIT decoder reads it without further reshuffle.
-    struct ggml_tensor * logits_flat = ggml_mul_mat(gctx, pt->lm.audio_heads, hidden);
-    struct ggml_tensor * logits      = ggml_reshape_4d(gctx, logits_flat, V, K, S, B_prime);
-    ggml_set_name(logits, "audio_logits");
-
-    // Audio truncation: when T_audio > 0, the MaskGIT decoder only reads the
-    // audio positions on cond row 0 (S range [S - T_audio, S)) and on uncond
-    // row 1 (S range [0, T_audio)). Cutting these views before set_output
-    // shrinks the GPU->CPU transfer from B_prime * V * K * S floats down to
-    // 2 * V * K * T_audio floats, ~5.6x less for the typical voice cloning
-    // shape. Math is identical: we just keep less of the same elements.
-    struct ggml_tensor * cond_audio   = nullptr;
-    struct ggml_tensor * uncond_audio = nullptr;
-    if (T_audio > 0) {
-        size_t               cond_offset = (size_t) (S - T_audio) * logits->nb[2] + (size_t) 0 * logits->nb[3];
-        struct ggml_tensor * cond_view =
-            ggml_view_4d(gctx, logits, V, K, T_audio, 1, logits->nb[1], logits->nb[2], logits->nb[3], cond_offset);
-        cond_audio = ggml_cont(gctx, cond_view);
-        ggml_set_name(cond_audio, "cond_audio_logits");
-        ggml_set_output(cond_audio);
-
-        size_t               uncond_offset = (size_t) 0 * logits->nb[2] + (size_t) 1 * logits->nb[3];
-        struct ggml_tensor * uncond_view =
-            ggml_view_4d(gctx, logits, V, K, T_audio, 1, logits->nb[1], logits->nb[2], logits->nb[3], uncond_offset);
-        uncond_audio = ggml_cont(gctx, uncond_view);
-        ggml_set_name(uncond_audio, "uncond_audio_logits");
-        ggml_set_output(uncond_audio);
-    } else {
-        ggml_set_output(logits);
-    }
-
-    struct ggml_cgraph * graph = ggml_new_graph_custom(gctx, n_max_nodes, false);
-    if (T_audio > 0) {
-        ggml_build_forward_expand(graph, cond_audio);
-        ggml_build_forward_expand(graph, uncond_audio);
-    } else {
-        ggml_build_forward_expand(graph, logits);
-    }
-
-    ggml_backend_sched_reset(pt->sched);
-    if (!ggml_backend_sched_alloc_graph(pt->sched, graph)) {
-        ov_log(OV_LOG_ERROR, "[LM-Forward-Batched] sched_alloc_graph failed (B'=%d K=%d S=%d)", B_prime, K, S);
-        ggml_free(gctx);
-        return {};
-    }
-
-    ggml_backend_tensor_set(t_text_ids, text_ids_buf.data(), 0, (size_t) B_prime * (size_t) S * sizeof(int32_t));
-    ggml_backend_tensor_set(t_shifted, shifted.data(), 0, (size_t) K * (size_t) B_prime * (size_t) S * sizeof(int32_t));
-    ggml_backend_tensor_set(t_mask, ctx->mask_f.data(), 0, (size_t) B_prime * (size_t) S * sizeof(float));
-    ggml_backend_tensor_set(t_inv_mask, ctx->inv_mask_f.data(), 0, (size_t) B_prime * (size_t) S * sizeof(float));
-    ggml_backend_tensor_set(t_positions, ctx->positions.data(), 0, (size_t) S * sizeof(int32_t));
-
-    if (t_attn) {
-        ggml_backend_tensor_set(t_attn, ctx->attn_f16.data(), 0,
+    // Upload every input before each replay: the mutating ids plus the constant
+    // mask / positions buffers. Refreshing the constants keeps them out of the
+    // allocator intermediate reuse pool at the cost of a cheap H2D copy, the
+    // expensive F16 conversion already lives cached in the ctx.
+    ggml_backend_tensor_set(ctx->lm_text_ids, text_ids_buf.data(), 0, (size_t) B_prime * (size_t) S * sizeof(int32_t));
+    ggml_backend_tensor_set(ctx->lm_shifted, shifted.data(), 0,
+                            (size_t) K * (size_t) B_prime * (size_t) S * sizeof(int32_t));
+    ggml_backend_tensor_set(ctx->lm_mask, ctx->mask_f.data(), 0, (size_t) B_prime * (size_t) S * sizeof(float));
+    ggml_backend_tensor_set(ctx->lm_inv_mask, ctx->inv_mask_f.data(), 0, (size_t) B_prime * (size_t) S * sizeof(float));
+    ggml_backend_tensor_set(ctx->lm_positions, ctx->positions.data(), 0, (size_t) S * sizeof(int32_t));
+    if (ctx->lm_attn) {
+        ggml_backend_tensor_set(ctx->lm_attn, ctx->attn_f16.data(), 0,
                                 (size_t) B_prime * (size_t) S * (size_t) S * sizeof(uint16_t));
     }
 
-    enum ggml_status st = ggml_backend_sched_graph_compute(pt->sched, graph);
+    // The graph stays allocated across steps: is_alloc is true so the compute
+    // skips the reset, the split, and the allocation and runs the splits only.
+    enum ggml_status st = ggml_backend_sched_graph_compute(pt->sched, ctx->lm_gf);
     if (st != GGML_STATUS_SUCCESS) {
         ov_log(OV_LOG_ERROR, "[LM-Forward-Batched] graph_compute status=%d", (int) st);
-        ggml_backend_sched_reset(pt->sched);
-        ggml_free(gctx);
         return {};
     }
 
@@ -584,17 +624,38 @@ std::vector<float> pipeline_tts_llm_forward_batched(PipelineTTS *             pt
     if (T_audio > 0) {
         const size_t per_audio = (size_t) V * (size_t) K * (size_t) T_audio;
         out.resize(2 * per_audio);
-        ggml_backend_tensor_get(cond_audio, out.data(), 0, per_audio * sizeof(float));
-        ggml_backend_tensor_get(uncond_audio, out.data() + per_audio, 0, per_audio * sizeof(float));
+        ggml_backend_tensor_get(ctx->lm_cond_audio, out.data(), 0, per_audio * sizeof(float));
+        ggml_backend_tensor_get(ctx->lm_uncond_audio, out.data() + per_audio, 0, per_audio * sizeof(float));
     } else {
-        const size_t n = ggml_nelements(logits);
+        const size_t n = ggml_nelements(ctx->lm_logits);
         out.resize(n);
-        ggml_backend_tensor_get(logits, out.data(), 0, n * sizeof(float));
+        ggml_backend_tensor_get(ctx->lm_logits, out.data(), 0, n * sizeof(float));
     }
 
-    ggml_backend_sched_reset(pt->sched);
-    ggml_free(gctx);
     return out;
+}
+
+// Release the static LM graph held by the context. Resets the scheduler so a
+// later graph of a different shape re-splits, then frees the graph context.
+void pipeline_tts_llm_batched_ctx_free(PipelineTTS * pt, MaskgitBatchedCtx * ctx) {
+    if (ctx->lm_built) {
+        ggml_backend_sched_reset(pt->sched);
+    }
+    if (ctx->lm_gctx) {
+        ggml_free(ctx->lm_gctx);
+        ctx->lm_gctx = nullptr;
+    }
+    ctx->lm_gf           = nullptr;
+    ctx->lm_text_ids     = nullptr;
+    ctx->lm_shifted      = nullptr;
+    ctx->lm_mask         = nullptr;
+    ctx->lm_inv_mask     = nullptr;
+    ctx->lm_positions    = nullptr;
+    ctx->lm_attn         = nullptr;
+    ctx->lm_cond_audio   = nullptr;
+    ctx->lm_uncond_audio = nullptr;
+    ctx->lm_logits       = nullptr;
+    ctx->lm_built        = false;
 }
 
 // Public TTS entry. Tokenize text, build prompt + CFG batch via prompt_tts_build,

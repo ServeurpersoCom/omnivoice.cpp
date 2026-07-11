@@ -197,6 +197,7 @@ static std::vector<int32_t> maskgit_generate(PipelineTTS *         pt,
         const size_t expected      = audio_only ? 2 * per_audio : (size_t) B_prime * per_full_item;
         if (logits_full.size() != expected) {
             fprintf(stderr, "[MaskGIT] FATAL: forward returned %zu f32 (expected %zu)\n", logits_full.size(), expected);
+            pipeline_tts_llm_batched_ctx_free(pt, &batched_ctx);
             return {};
         }
 
@@ -362,5 +363,6 @@ static std::vector<int32_t> maskgit_generate(PipelineTTS *         pt,
         *ctr_lo_inout = ctr_lo;
     }
 
+    pipeline_tts_llm_batched_ctx_free(pt, &batched_ctx);
     return tokens;
 }

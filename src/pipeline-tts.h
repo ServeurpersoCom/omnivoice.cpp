@@ -87,6 +87,25 @@ struct MaskgitBatchedCtx {
 
     const int32_t * audio_mask_raw;
     const int32_t * attn_mask_raw;
+
+    // Static LM graph replayed across the MaskGIT steps. The topology is fixed
+    // within a request, so the graph is built once, allocated once through the
+    // scheduler, and replayed with a fresh input_ids upload per step. lm_key_K
+    // and lm_key_T_audio detect a shape change that forces a rebuild.
+    struct ggml_context * lm_gctx         = nullptr;
+    struct ggml_cgraph *  lm_gf           = nullptr;
+    struct ggml_tensor *  lm_text_ids     = nullptr;
+    struct ggml_tensor *  lm_shifted      = nullptr;
+    struct ggml_tensor *  lm_mask         = nullptr;
+    struct ggml_tensor *  lm_inv_mask     = nullptr;
+    struct ggml_tensor *  lm_positions    = nullptr;
+    struct ggml_tensor *  lm_attn         = nullptr;
+    struct ggml_tensor *  lm_cond_audio   = nullptr;
+    struct ggml_tensor *  lm_uncond_audio = nullptr;
+    struct ggml_tensor *  lm_logits       = nullptr;
+    int                   lm_key_K        = 0;
+    int                   lm_key_T_audio  = -1;
+    bool                  lm_built        = false;
 };
 
 // Pre-compute the batched context from the prompt buffers. The original
@@ -110,12 +129,17 @@ void pipeline_tts_llm_batched_ctx_init(MaskgitBatchedCtx * ctx,
 //            takes positions [S - T_audio, S), uncond row takes [0, T_audio).
 //            Avoids transferring ~5.6x more data on the GPU->CPU bus.
 // Output     either [B', V, K, S] (T_audio == 0) or 2*V*K*T_audio (T_audio > 0).
-std::vector<float> pipeline_tts_llm_forward_batched(PipelineTTS *             pt,
-                                                    const int32_t *           input_ids,
-                                                    const MaskgitBatchedCtx * ctx,
-                                                    int                       K,
-                                                    int                       T_audio         = 0,
-                                                    const char *              dump_hidden_dir = nullptr);
+std::vector<float> pipeline_tts_llm_forward_batched(PipelineTTS *       pt,
+                                                    const int32_t *     input_ids,
+                                                    MaskgitBatchedCtx * ctx,
+                                                    int                 K,
+                                                    int                 T_audio         = 0,
+                                                    const char *        dump_hidden_dir = nullptr);
+
+// Release the static LM graph held by the context. Resets the scheduler so a
+// later graph of a different shape re-splits, then frees the graph context.
+// Safe to call on a context that never built a graph.
+void pipeline_tts_llm_batched_ctx_free(PipelineTTS * pt, MaskgitBatchedCtx * ctx);
 
 // Low-level token generator: tokenize text, build prompt + CFG batch, run
 // the MaskGIT iterative decoder. Returns flat audio_tokens of size K * T (k
