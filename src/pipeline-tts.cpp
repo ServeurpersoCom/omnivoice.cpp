@@ -372,7 +372,7 @@ static bool lm_batched_graph_build(PipelineTTS * pt, MaskgitBatchedCtx * ctx, in
     const int           S       = ctx->S;
 
     if (ctx->lm_gctx) {
-        ggml_backend_sched_reset(pt->sched);
+        static_graph_release(&ctx->lm_graph, pt->sched);
         ggml_free(ctx->lm_gctx);
         ctx->lm_gctx = nullptr;
     }
@@ -395,20 +395,27 @@ static bool lm_batched_graph_build(PipelineTTS * pt, MaskgitBatchedCtx * ctx, in
     ggml_set_name(t_shifted, "shifted_ids");
     ggml_set_input(t_shifted);
 
+    // text_ids and shifted_ids upload before every replay; the masks and
+    // positions bake once, so they also carry the output flag: the allocator
+    // never frees an output, which keeps their slots out of the intermediate
+    // reuse pool across replays.
     // [1, S, B_prime] so multiplying with hidden states [H, S, B_prime]
     // broadcasts on H (dim 0) and matches per (s, b).
     struct ggml_tensor * t_mask = ggml_new_tensor_3d(gctx, GGML_TYPE_F32, 1, S, B_prime);
     ggml_set_name(t_mask, "mask");
     ggml_set_input(t_mask);
+    ggml_set_output(t_mask);
 
     struct ggml_tensor * t_inv_mask = ggml_new_tensor_3d(gctx, GGML_TYPE_F32, 1, S, B_prime);
     ggml_set_name(t_inv_mask, "inv_mask");
     ggml_set_input(t_inv_mask);
+    ggml_set_output(t_inv_mask);
 
     // RoPE positions are 0..S-1, identical for cond and uncond rows.
     struct ggml_tensor * t_positions = ggml_new_tensor_1d(gctx, GGML_TYPE_I32, S);
     ggml_set_name(t_positions, "positions");
     ggml_set_input(t_positions);
+    ggml_set_output(t_positions);
 
     // Per-row attention bias. flash_attn_ext expects mask [n_kv, n_batch, ne32, ne33]
     // with n_head broadcast through ne32 and the outer batch through ne33. Layout
@@ -418,6 +425,7 @@ static bool lm_batched_graph_build(PipelineTTS * pt, MaskgitBatchedCtx * ctx, in
         t_attn = ggml_new_tensor_4d(gctx, GGML_TYPE_F16, S, S, 1, B_prime);
         ggml_set_name(t_attn, "attn_mask");
         ggml_set_input(t_attn);
+        ggml_set_output(t_attn);
     }
     // Custom embed. The flat get_rows runs on a B_prime * S row index buffer
     // and produces [H, B_prime * S] which we promote to [H, S, B_prime] before
@@ -481,8 +489,7 @@ static bool lm_batched_graph_build(PipelineTTS * pt, MaskgitBatchedCtx * ctx, in
     } else {
         ggml_build_forward_expand(graph, logits);
     }
-    ggml_backend_sched_reset(pt->sched);
-    if (!ggml_backend_sched_alloc_graph(pt->sched, graph)) {
+    if (!static_graph_alloc(&ctx->lm_graph, pt->backend, pt->sched, graph)) {
         ov_log(OV_LOG_ERROR, "[LM-Forward-Batched] sched_alloc_graph failed (B'=%d K=%d S=%d)", B_prime, K, S);
         ggml_free(gctx);
         return false;
@@ -501,7 +508,17 @@ static bool lm_batched_graph_build(PipelineTTS * pt, MaskgitBatchedCtx * ctx, in
     ctx->lm_logits       = logits;
     ctx->lm_key_K        = K;
     ctx->lm_key_T_audio  = T_audio;
-    ctx->lm_built        = true;
+    if (ctx->lm_graph.direct) {
+        ggml_backend_tensor_set(ctx->lm_mask, ctx->mask_f.data(), 0, (size_t) B_prime * (size_t) S * sizeof(float));
+        ggml_backend_tensor_set(ctx->lm_inv_mask, ctx->inv_mask_f.data(), 0,
+                                (size_t) B_prime * (size_t) S * sizeof(float));
+        ggml_backend_tensor_set(ctx->lm_positions, ctx->positions.data(), 0, (size_t) S * sizeof(int32_t));
+        if (ctx->lm_attn) {
+            ggml_backend_tensor_set(ctx->lm_attn, ctx->attn_f16.data(), 0,
+                                    (size_t) B_prime * (size_t) S * (size_t) S * sizeof(uint16_t));
+        }
+    }
+    ctx->lm_built = true;
     return true;
 }
 
@@ -575,8 +592,10 @@ std::vector<float> pipeline_tts_llm_forward_batched(PipelineTTS *       pt,
     // steps via the demask injection). Layouts :
     //   text_ids_buf [B_prime, S]    matches t_text_ids [B_prime * S], b slow
     //   shifted      [K, B_prime, S] matches t_shifted [B_prime * S, K], k slow
-    std::vector<int32_t> shifted((size_t) K * (size_t) B_prime * (size_t) S);
-    std::vector<int32_t> text_ids_buf((size_t) B_prime * (size_t) S);
+    ctx->shifted.resize((size_t) K * (size_t) B_prime * (size_t) S);
+    ctx->text_ids.resize((size_t) B_prime * (size_t) S);
+    std::vector<int32_t> & shifted      = ctx->shifted;
+    std::vector<int32_t> & text_ids_buf = ctx->text_ids;
     for (int b = 0; b < B_prime; b++) {
         for (int s = 0; s < S; s++) {
             int m                            = (ctx->audio_mask_raw[(size_t) b * S + s] != 0) ? 1 : 0;
@@ -597,24 +616,26 @@ std::vector<float> pipeline_tts_llm_forward_batched(PipelineTTS *       pt,
         }
     }
 
-    // Upload every input before each replay: the mutating ids plus the constant
-    // mask / positions buffers. Refreshing the constants keeps them out of the
-    // allocator intermediate reuse pool at the cost of a cheap H2D copy, the
-    // expensive F16 conversion already lives cached in the ctx.
+    // Mutable token ids upload every step. A direct graph pins the masks and
+    // positions through their output flag, so they bake once at build; the
+    // scheduler fallback refreshes them because its input buffers may be
+    // reused as scratch between computes.
     ggml_backend_tensor_set(ctx->lm_text_ids, text_ids_buf.data(), 0, (size_t) B_prime * (size_t) S * sizeof(int32_t));
     ggml_backend_tensor_set(ctx->lm_shifted, shifted.data(), 0,
                             (size_t) K * (size_t) B_prime * (size_t) S * sizeof(int32_t));
-    ggml_backend_tensor_set(ctx->lm_mask, ctx->mask_f.data(), 0, (size_t) B_prime * (size_t) S * sizeof(float));
-    ggml_backend_tensor_set(ctx->lm_inv_mask, ctx->inv_mask_f.data(), 0, (size_t) B_prime * (size_t) S * sizeof(float));
-    ggml_backend_tensor_set(ctx->lm_positions, ctx->positions.data(), 0, (size_t) S * sizeof(int32_t));
-    if (ctx->lm_attn) {
-        ggml_backend_tensor_set(ctx->lm_attn, ctx->attn_f16.data(), 0,
-                                (size_t) B_prime * (size_t) S * (size_t) S * sizeof(uint16_t));
+    if (!ctx->lm_graph.direct) {
+        ggml_backend_tensor_set(ctx->lm_mask, ctx->mask_f.data(), 0, (size_t) B_prime * (size_t) S * sizeof(float));
+        ggml_backend_tensor_set(ctx->lm_inv_mask, ctx->inv_mask_f.data(), 0,
+                                (size_t) B_prime * (size_t) S * sizeof(float));
+        ggml_backend_tensor_set(ctx->lm_positions, ctx->positions.data(), 0, (size_t) S * sizeof(int32_t));
+        if (ctx->lm_attn) {
+            ggml_backend_tensor_set(ctx->lm_attn, ctx->attn_f16.data(), 0,
+                                    (size_t) B_prime * (size_t) S * (size_t) S * sizeof(uint16_t));
+        }
     }
 
-    // The graph stays allocated across steps: is_alloc is true so the compute
-    // skips the reset, the split, and the allocation and runs the splits only.
-    enum ggml_status st = ggml_backend_sched_graph_compute(pt->sched, ctx->lm_gf);
+    // The graph and its allocation persist across MaskGIT steps.
+    enum ggml_status st = static_graph_compute(&ctx->lm_graph, pt->backend, pt->sched, ctx->lm_gf);
     if (st != GGML_STATUS_SUCCESS) {
         ov_log(OV_LOG_ERROR, "[LM-Forward-Batched] graph_compute status=%d", (int) st);
         return {};
@@ -638,9 +659,7 @@ std::vector<float> pipeline_tts_llm_forward_batched(PipelineTTS *       pt,
 // Release the static LM graph held by the context. Resets the scheduler so a
 // later graph of a different shape re-splits, then frees the graph context.
 void pipeline_tts_llm_batched_ctx_free(PipelineTTS * pt, MaskgitBatchedCtx * ctx) {
-    if (ctx->lm_built) {
-        ggml_backend_sched_reset(pt->sched);
-    }
+    static_graph_release(&ctx->lm_graph, pt->sched);
     if (ctx->lm_gctx) {
         ggml_free(ctx->lm_gctx);
         ctx->lm_gctx = nullptr;

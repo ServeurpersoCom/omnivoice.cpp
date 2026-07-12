@@ -10,6 +10,7 @@
 #include "ggml-backend.h"
 #include "omnivoice-llm.h"
 #include "omnivoice.h"
+#include "static-graph.h"
 #include "weight-ctx.h"
 
 #include <cstdint>
@@ -89,8 +90,8 @@ struct MaskgitBatchedCtx {
     const int32_t * attn_mask_raw;
 
     // Static LM graph replayed across the MaskGIT steps. The topology is fixed
-    // within a request, so the graph is built once, allocated once through the
-    // scheduler, and replayed with a fresh input_ids upload per step. lm_key_K
+    // within a request, so the graph is built once, allocated once directly when the backend supports every op,
+    // otherwise through the scheduler, and replayed with a fresh input_ids upload per step. lm_key_K
     // and lm_key_T_audio detect a shape change that forces a rebuild.
     struct ggml_context * lm_gctx         = nullptr;
     struct ggml_cgraph *  lm_gf           = nullptr;
@@ -103,9 +104,12 @@ struct MaskgitBatchedCtx {
     struct ggml_tensor *  lm_cond_audio   = nullptr;
     struct ggml_tensor *  lm_uncond_audio = nullptr;
     struct ggml_tensor *  lm_logits       = nullptr;
-    int                   lm_key_K        = 0;
-    int                   lm_key_T_audio  = -1;
-    bool                  lm_built        = false;
+    StaticGraph           lm_graph;
+    std::vector<int32_t>  shifted;
+    std::vector<int32_t>  text_ids;
+    int                   lm_key_K       = 0;
+    int                   lm_key_T_audio = -1;
+    bool                  lm_built       = false;
 };
 
 // Pre-compute the batched context from the prompt buffers. The original
