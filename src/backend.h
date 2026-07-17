@@ -1,9 +1,12 @@
 #pragma once
-// backend.h: shared GGML backend initialization
+// backend.h: GGML backend initialization
 //
 // All modules use the same pattern: load all backends, pick best GPU,
-// keep CPU as fallback. Single shared backend across modules in the
-// same binary, refcounted.
+// keep CPU as fallback. Each backend_init call returns a fresh backend
+// pair with its own device context and memory pool, so independent
+// ov_contexts never share allocator state and can run concurrently.
+// Sharing within one pipeline is done by passing the same BackendPair
+// to each module.
 
 #include "ggml-backend.h"
 #include "ov-error.h"
@@ -19,10 +22,6 @@ struct BackendPair {
     ggml_backend_t cpu_backend;
     bool           has_gpu;
 };
-
-// Cached backend state (shared across all modules in the same binary)
-static BackendPair g_backend_cache = {};
-static int         g_backend_refs  = 0;
 
 // Physical core count heuristic (logical / 2 for HT/SMT).
 // Used for GGML CPU thread count: GEMM shares SIMD units across hyperthreads,
@@ -64,9 +63,9 @@ static ggml_backend_t cpu_backend_new(int n_threads) {
 // Initialize backends: load all available (CUDA, Metal, Vulkan...),
 // pick the best one, keep CPU as fallback.
 // label: log prefix, e.g. "DiT", "VAE", "LM"
-// Subsequent calls reuse the same backend (single VMM pool). Returns a
-// BackendPair with .backend == NULL when initialisation fails; the caller
-// must check this before passing it to any pipeline_*_load.
+// Each call returns a fresh backend pair with its own memory pool.
+// Returns a BackendPair with .backend == NULL when initialisation fails;
+// the caller must check this before passing it to any pipeline_*_load.
 // Collapse exact consecutive duplicate ggml log lines and report the total
 // count when the run ends (tames the CUDA graph capture "reused" flood).
 static void ov_ggml_log(enum ggml_log_level level, const char * text, void * user_data) {
@@ -92,19 +91,15 @@ static void ov_ggml_log(enum ggml_log_level level, const char * text, void * use
 }
 
 static BackendPair backend_init(const char * label) {
-    static bool log_installed = false;
-    if (!log_installed) {
+    // Magic static: log callback install and dynamic backend loading
+    // happen exactly once, safe under concurrent init calls.
+    static const bool loaded = [] {
         ggml_log_set(ov_ggml_log, nullptr);
-        log_installed = true;
-    }
+        ggml_backend_load_all();
+        return true;
+    }();
+    (void) loaded;
 
-    if (g_backend_refs > 0) {
-        g_backend_refs++;
-        ov_log(OV_LOG_INFO, "[Load] %s backend: %s (shared)", label, ggml_backend_name(g_backend_cache.backend));
-        return g_backend_cache;
-    }
-
-    ggml_backend_load_all();
     BackendPair bp = {};
 
     // GGML_BACKEND env var: force a specific device instead of auto-best.
@@ -152,26 +147,16 @@ static BackendPair backend_init(const char * label) {
     }
     bp.has_gpu = !best_is_cpu;
     ov_log(OV_LOG_INFO, "[Load] %s backend: %s (CPU threads: %d)", label, ggml_backend_name(bp.backend), n_threads);
-
-    g_backend_cache = bp;
-    g_backend_refs  = 1;
     return bp;
 }
 
-// Release a backend reference. Frees GPU + CPU backends when refcount hits 0.
+// Free a backend pair returned by backend_init.
 static void backend_release(ggml_backend_t backend, ggml_backend_t cpu_backend) {
-    if (g_backend_refs <= 0) {
-        return;
+    if (backend && backend != cpu_backend) {
+        ggml_backend_free(backend);
     }
-    g_backend_refs--;
-    if (g_backend_refs == 0) {
-        if (backend && backend != cpu_backend) {
-            ggml_backend_free(backend);
-        }
-        if (cpu_backend) {
-            ggml_backend_free(cpu_backend);
-        }
-        g_backend_cache = {};
+    if (cpu_backend) {
+        ggml_backend_free(cpu_backend);
     }
 }
 
