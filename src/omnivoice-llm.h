@@ -59,25 +59,26 @@ static bool omnivoice_lm_load(OmniVoiceLM * m, const GGUFModel & gf, WeightCtx *
     m->cfg.n_heads           = (int) gf_get_u32(gf, "omnivoice-lm.attention.head_count");
     m->cfg.n_kv_heads        = (int) gf_get_u32(gf, "omnivoice-lm.attention.head_count_kv");
     m->cfg.head_dim          = (int) gf_get_u32(gf, "omnivoice-lm.attention.key_length");
-    m->cfg.n_layers          = (int) gf_get_u32(gf, "omnivoice-lm.block_count");
+    uint32_t block_count     = gf_get_u32(gf, "omnivoice-lm.block_count");
+    m->cfg.n_layers          = (int) block_count;
     m->cfg.rope_theta        = gf_get_f32(gf, "omnivoice-lm.rope.freq_base");
     m->cfg.rms_norm_eps      = gf_get_f32(gf, "omnivoice-lm.attention.layer_norm_rms_epsilon");
     m->cfg.is_causal         = false;  // MaskGIT, full bidirectional attention
 
-    if (m->cfg.n_layers > QWEN3_MAX_LAYERS) {
-        fprintf(stderr, "[LM-Load] FATAL: n_layers=%d exceeds QWEN3_MAX_LAYERS=%d\n", m->cfg.n_layers,
-                QWEN3_MAX_LAYERS);
+    if (block_count == 0 || block_count > (uint32_t) QWEN3_MAX_LAYERS) {
+        fprintf(stderr, "[LM-Load] FATAL: invalid block_count=%u (max %d)\n", block_count, QWEN3_MAX_LAYERS);
         return false;
     }
 
     // Audio config from omnivoice.* namespace
-    m->num_audio_codebook = (int) gf_get_u32(gf, "omnivoice.num_audio_codebook");
+    uint32_t num_codebook = gf_get_u32(gf, "omnivoice.num_audio_codebook");
+    m->num_audio_codebook = (int) num_codebook;
     m->audio_vocab_size   = (int) gf_get_u32(gf, "omnivoice.audio_vocab_size");
     m->audio_mask_id      = (int) gf_get_u32(gf, "omnivoice.audio_mask_id");
 
-    if (m->num_audio_codebook > OMNIVOICE_MAX_CODEBOOKS) {
-        fprintf(stderr, "[LM-Load] FATAL: num_audio_codebook=%d exceeds OMNIVOICE_MAX_CODEBOOKS=%d\n",
-                m->num_audio_codebook, OMNIVOICE_MAX_CODEBOOKS);
+    if (num_codebook == 0 || num_codebook > (uint32_t) OMNIVOICE_MAX_CODEBOOKS) {
+        fprintf(stderr, "[LM-Load] FATAL: invalid num_audio_codebook=%u (max %d)\n", num_codebook,
+                OMNIVOICE_MAX_CODEBOOKS);
         return false;
     }
 
