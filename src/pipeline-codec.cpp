@@ -640,6 +640,7 @@ static std::vector<float> pipeline_codec_sem_enc_test(PipelineCodec * pc, const 
     struct ggml_cgraph * graph = ggml_new_graph_custom(gctx, n_max_nodes, false);
     ggml_build_forward_expand(graph, sem_out);
 
+    ggml_backend_sched_reset(pc->sched);
     if (!ggml_backend_sched_alloc_graph(pc->sched, graph)) {
         ggml_backend_sched_reset(pc->sched);
         ggml_free(gctx);
