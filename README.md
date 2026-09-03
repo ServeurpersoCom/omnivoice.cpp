@@ -78,6 +78,12 @@ build/omnivoice-tts \
     --lang English -o out.wav < prompt.txt
 ```
 
+## Server
+
+The `tts-server` provides an OpenAI-compatible HTTP API for remote text-to-speech.
+
+See [TTS_SERVER_README.md](TTS_SERVER_README.md) for detailed API documentation, endpoint descriptions, and usage examples.
+
 ## Embedding the library
 
 The CLI tools are thin wrappers over a public ABI. Single-header,
