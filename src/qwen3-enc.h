@@ -201,7 +201,7 @@ static struct ggml_tensor * qwen3_build_self_attn(struct ggml_context * ctx,
     struct ggml_tensor * attn  = use_flash_attn ? ggml_flash_attn_ext(ctx, q, k, v, mask, scale, 0.0f, 0.0f) :
                                                   qwen3_attn_f32(ctx, q, k, v, mask, scale);
     if (use_flash_attn) {
-        ggml_flash_attn_ext_set_prec(attn, GGML_PREC_F32);
+        ggml_prec_set_acc(attn, GGML_PREC_F32);
     }
 
     // 7) Reshape back: [D, Nh, S(, B)] -> [Nh*D, S(, B)]
