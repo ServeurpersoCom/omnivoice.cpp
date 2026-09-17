@@ -87,11 +87,7 @@ int main(int argc, char ** argv) {
             use_fa = false;
         } else if (!std::strcmp(arg, "--clamp-fp16")) {
             clamp_fp16 = true;
-        } else if (!std::strcmp(arg, "--help") || !std::strcmp(arg, "-h")) {
-            print_usage(argv[0]);
-            return 0;
         } else {
-            fprintf(stderr, "[CLI] ERROR: unknown arg: %s\n", arg);
             print_usage(argv[0]);
             return 1;
         }
