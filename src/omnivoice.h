@@ -181,8 +181,9 @@ OV_API void ov_log_set(ov_log_cb cb, void * user_data);
 struct ov_tts_params {
     int abi_version;
 
-    // Input text and language hint. lang accepts "" (auto), "en" or "zh"
-    // matching the upstream OmniVoice convention. instruct is the raw
+    // Input text and language hint. lang accepts "" for auto, an ISO id
+    // ("fr") or a language name ("french"), resolved against the table the
+    // model was trained with; ov_n_languages enumerates it. instruct is the raw
     // attribute string ("female young adult moderate"), validated and
     // normalised internally against the bundled VoiceDesign.
     const char * text;
@@ -273,6 +274,15 @@ OV_API int ov_duration_sec_to_tokens(const struct ov_context * ov, float duratio
 // callers reading a packed .rvq stream need K to derive ref_T from the
 // code count. Returns 0 on a NULL handle.
 OV_API int ov_num_codebooks(const struct ov_context * ov);
+
+// Languages the synthesis accepts as a hint, in the order of the bundled
+// table. An empty hint leaves the model to infer one from the text, so "auto"
+// is not an entry here. The id is what the prompt carries ("fr"), the name is
+// what a user reads ("french"); both pointers are static and outlive any
+// context.
+OV_API int          ov_n_languages(void);
+OV_API const char * ov_language_id(int i);
+OV_API const char * ov_language_name(int i);
 
 // Pre-encoded voice reference codes, the in-process equivalent of an
 // omnivoice-codec CLI encode. Plain POD: ref_codes is malloc allocated

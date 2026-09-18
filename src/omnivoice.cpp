@@ -13,6 +13,7 @@
 #include "audio-postproc.h"
 #include "backend.h"
 #include "bpe.h"
+#include "lang-map.h"
 #include "ov-error.h"
 #include "pipeline-codec.h"
 #include "pipeline-tts.h"
@@ -347,6 +348,24 @@ int ov_num_codebooks(const struct ov_context * ov) {
         return 0;
     }
     return ov->pt.lm.num_audio_codebook;
+}
+
+int ov_n_languages(void) {
+    return LANG_NAME_TO_ID_TABLE_N;
+}
+
+const char * ov_language_id(int i) {
+    if (i < 0 || i >= LANG_NAME_TO_ID_TABLE_N) {
+        return NULL;
+    }
+    return LANG_NAME_TO_ID_TABLE[i].second;
+}
+
+const char * ov_language_name(int i) {
+    if (i < 0 || i >= LANG_NAME_TO_ID_TABLE_N) {
+        return NULL;
+    }
+    return LANG_NAME_TO_ID_TABLE[i].first;
 }
 
 void ov_voice_ref_free(struct ov_voice_ref * ref) {
