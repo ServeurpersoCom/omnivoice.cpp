@@ -5,4 +5,4 @@ mkdir build
 cd build
 
 cmake .. -DGGML_CUDA=ON -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc
-cmake --build . --config Release -j "$(nproc)"
+cmake --build . --config Release -j "$(getconf _NPROCESSORS_ONLN)"
