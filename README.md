@@ -31,6 +31,8 @@ cd omnivoice.cpp
 NVCC_CCBIN=g++-13 ./buildcuda.sh # rolling release distros (Arch w/ GCC 16, etc.)
 ```
 
+`-DGGML_SOURCE_DIR=<path>` swaps the ggml submodule for another tree (upstream ggml, llama.cpp/ggml).
+
 ## Model conversion
 
 Pre-converted GGUFs are available on Hugging Face :
