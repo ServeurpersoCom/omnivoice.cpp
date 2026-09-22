@@ -758,9 +758,10 @@ POST   /v1/audio/speech         OAI text-to-speech; response_format "pcm"
                                 streams s16le 24 kHz mono chunked as it is
                                 generated, "wav" returns a one-shot RIFF file.
                                 Optional fields: language overrides --lang for
-                                this request, voice selects a registered
-                                clone, instructions drives voice design, seed
-                                makes the request reproducible
+                                this request (an unknown one is a 400), voice
+                                selects a registered clone, instructions drives
+                                voice design, seed makes the request
+                                reproducible
 GET    /v1/models               single loaded model
 GET    /v1/audio/voices         registered cloned voices
 POST   /v1/audio/voices         register a cloned voice: {name, ref_text,

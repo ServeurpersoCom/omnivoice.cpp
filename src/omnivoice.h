@@ -181,11 +181,12 @@ OV_API void ov_log_set(ov_log_cb cb, void * user_data);
 struct ov_tts_params {
     int abi_version;
 
-    // Input text and language hint. lang accepts "" for auto, an ISO id
-    // ("fr") or a language name ("french"), resolved against the table the
-    // model was trained with; ov_n_languages enumerates it. instruct is the raw
-    // attribute string ("female young adult moderate"), validated and
-    // normalised internally against the bundled VoiceDesign.
+    // Input text and language hint. lang accepts "" or "none" for auto, an
+    // ISO id ("fr") or a language name ("french"), resolved against the table
+    // the model was trained with; ov_n_languages enumerates it, and anything
+    // else is OV_STATUS_INVALID_PARAMS. instruct is the raw attribute string
+    // ("female young adult moderate"), validated and normalised internally
+    // against the bundled VoiceDesign.
     const char * text;
     const char * lang;
     const char * instruct;

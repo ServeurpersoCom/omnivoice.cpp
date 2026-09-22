@@ -21,6 +21,7 @@
 #include "voice-design.h"
 
 #include <atomic>
+#include <cctype>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -284,6 +285,19 @@ void ov_free(struct ov_context * ov) {
     delete ov;
 }
 
+// A language the synthesis speaks: none, empty or NULL for auto, or what
+// resolve_language finds in the table, an ISO id or a name in any case.
+static bool ov_language_known(const char * lang) {
+    if (!lang || !lang[0]) {
+        return true;
+    }
+    std::string name = lang;
+    for (char & c : name) {
+        c = (char) std::tolower((unsigned char) c);
+    }
+    return name == "none" || !resolve_language(lang).empty();
+}
+
 enum ov_status ov_synthesize(struct ov_context * ov, const struct ov_tts_params * params, struct ov_audio * out) {
     if (!ov || !params) {
         ov_set_error("ov_synthesize: ov / params is NULL");
@@ -314,6 +328,13 @@ enum ov_status ov_synthesize(struct ov_context * ov, const struct ov_tts_params 
             ov_audio_free(out);
         }
         ov_log(OV_LOG_ERROR, "[OmniVoice] ov_synthesize requires a codec-loaded handle");
+        return OV_STATUS_INVALID_PARAMS;
+    }
+    if (!ov_language_known(params->lang)) {
+        ov_set_error("ov_synthesize: unknown language '%s'", params->lang);
+        if (out) {
+            ov_audio_free(out);
+        }
         return OV_STATUS_INVALID_PARAMS;
     }
     // Defense in depth: the synthesis path normally reports failures via
