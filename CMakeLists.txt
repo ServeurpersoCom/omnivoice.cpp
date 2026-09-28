@@ -62,7 +62,7 @@ endif()
 if(NOT DEFINED GGML_CUDA_GRAPHS)
     set(GGML_CUDA_GRAPHS_DEFAULT ON)
 endif()
-set(GGML_SOURCE_DIR "${CMAKE_SOURCE_DIR}/ggml" CACHE PATH "ggml source tree")
+set(GGML_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ggml" CACHE PATH "ggml source tree")
 add_subdirectory(${GGML_SOURCE_DIR} ggml)
 
 # cpp-httplib (HTTP server library, no SSL, behind reverse proxy in prod).
