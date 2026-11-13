@@ -1211,13 +1211,16 @@ static float duration_estimate(const std::string & target_text,
 // Number of target audio tokens for a synthesis call. Mirrors
 // OmniVoice._estimate_target_tokens: when no reference is available,
 // falls back to the canonical 'Nice to meet you.' anchor at 25 tokens.
-// Result is truncated to int (Python int() semantics) and floored to 1.
+// Short unprompted utterances need at least 45 frames (1.8 s at 25 Hz):
+// the original estimate can decode mostly DC/noise for short speech.
+// Reference-conditioned estimates retain the upstream behavior.
 static int duration_estimate_tokens(const std::string & target_text,
                                     const std::string & ref_text,
                                     int                 ref_audio_tokens) {
     std::string rt;
     int         rd;
-    if (ref_audio_tokens > 0 && !ref_text.empty()) {
+    bool has_reference = ref_audio_tokens > 0 && !ref_text.empty();
+    if (has_reference) {
         rt = ref_text;
         rd = ref_audio_tokens;
     } else {
@@ -1228,6 +1231,9 @@ static int duration_estimate_tokens(const std::string & target_text,
     int   tokens = (int) est;
     if (tokens < 1) {
         tokens = 1;
+    }
+    if (!has_reference && tokens < 45) {
+        tokens = 45;
     }
     return tokens;
 }

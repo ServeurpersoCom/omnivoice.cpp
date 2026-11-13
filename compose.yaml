@@ -1,0 +1,55 @@
+# =============================================================================
+# omnivoice-tts — deploy the Pascal (1080 Ti) TTS server on a GPU host.
+#
+# Built for the Portainer GPU host: the host holds the OmniVoice GGUFs under
+# /data/omnivoice and the nvidia container toolkit (so the `driver: nvidia`
+# reservation below is honoured). The image is the one produced by the
+# repo's Dockerfile, tagged for the 1080 Ti.
+#
+# Model / codec filenames below match the repo's `models.sh` (the OmniVoice-GGUF
+# set). If the mounted files use different names, only the two `command`
+# paths need changing — everything else stays the same.
+# =============================================================================
+
+services:
+  omnivoice-tts:
+    image: omnivoice-pascal:1080ti
+    container_name: omnivoice-tts
+    restart: unless-stopped
+
+    # The server listens on 0.0.0.0:8080 inside the container and is published
+    # to the host's 8080.
+    ports:
+      - "8080:8080"
+
+    # Models are read-only host files mounted into the container.
+    volumes:
+      - /data/omnivoice:/app/models:ro
+
+    # --model / --codec point at the mounted GGUFs; --host 0.0.0.0 so the
+    # published port is actually reachable (the binary defaults to 127.0.0.1).
+    command:
+      - --model
+      - /app/models/omnivoice-base-Q8_0.gguf
+      - --codec
+      - /app/models/omnivoice-tokenizer-F32.gguf
+      - --host
+      - "0.0.0.0"
+
+    # Single-GPU reservation. Compose-spec native; honoured by the nvidia
+    # container runtime / Portainer when the toolkit is installed on the host.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    # Liveness probe on the server's GET /health endpoint.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
