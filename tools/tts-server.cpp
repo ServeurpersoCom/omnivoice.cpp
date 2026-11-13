@@ -246,6 +246,9 @@ int main(int argc, char ** argv) {
         // fresh hardware random seed, anything else lands verbatim on
         // the MaskGIT sampler for reproducible output.
         p.mg_seed = (req.seed < 0) ? (uint64_t) std::random_device{}() : (uint64_t) req.seed;
+        if (req.steps > 0) {
+            p.mg_num_step = req.steps;
+        }
 
         // Trampoline : the C ABI on_chunk forwards to the C++ sink.
         const tts_sink * sink_ptr = &sink;
