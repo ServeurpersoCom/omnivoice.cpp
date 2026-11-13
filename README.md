@@ -87,7 +87,8 @@ Cloned voices register once over HTTP (a WAV encoded server side, or a
 `.rvq` from `omnivoice-codec`), stay resident in RAM and are then
 selected by name on every request, so a caller holds one voice per
 language across turns without touching the disk. `language` overrides
-the server default for a single request :
+the server default and `steps` the MaskGIT step count (default 32, fewer
+is faster) for a single request :
 
 ```
 ./build/tts-server \
@@ -101,7 +102,7 @@ curl -X POST localhost:8080/v1/audio/voices -H "Content-Type: application/json" 
 
 curl -X POST localhost:8080/v1/audio/speech -H "Content-Type: application/json" \
     -d '{"input":"Hello world.","voice":"freeman","language":"English",
-         "response_format":"wav","seed":42}' -o out.wav
+         "response_format":"wav","seed":42,"steps":16}' -o out.wav
 ```
 
 A `.rvq` payload must come from the same codec quantisation the server
