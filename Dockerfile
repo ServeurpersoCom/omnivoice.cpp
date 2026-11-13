@@ -88,11 +88,14 @@ COPY --from=build /src/build/*.so*       /app/
 EXPOSE 8080
 
 # Liveness probe: GET /health -> {"status":"ok"} (see src/tts-server.h).
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+# start_period 60s: loading the base model (Q8_0) + tokenizer takes ~30-60s.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -fsS "http://127.0.0.1:8080/health" || exit 1
 
-# --model / --codec are the GGUFs mounted at /app/models (see compose.yaml).
-# The entrypoint is the server itself; start it with, e.g.:
-#   tts-server --model /app/models/omnivoice-base.gguf \
-#              --codec /app/models/omnivoice-tokenizer.gguf --host 0.0.0.0
+# --model / --codec are the GGUFs mounted from the host (see compose.yaml:
+# /opt/models -> /opt/models, read-only). The entrypoint is the server itself;
+# start it with, e.g.:
+#   tts-server --model /opt/models/omnivoice-base-Q8_0.gguf \
+#              --codec /opt/models/omnivoice-tokenizer-Q8_0.gguf \
+#              --device CUDA0 --host 0.0.0.0 --port 8080
 ENTRYPOINT ["/app/tts-server"]
