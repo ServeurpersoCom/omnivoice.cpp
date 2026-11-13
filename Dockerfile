@@ -16,9 +16,15 @@
 # binary's own directory, so the runtime image must keep them beside the
 # executable. That is why the COPY below pulls the .so* artifacts with the binary.
 #
-# ggml is pulled from OUR fork (herr-schreiber/ggml) — see .gitmodules. The
-# Docker build does a normal `git clone --recurse-submodules` of this repo, so
-# it automatically checks out ggml at the fork (no separate `RUN git submodule`).
+# ggml is pulled from OUR fork (herr-schreiber/ggml) — see .gitmodules.
+#
+# NOTE: the build context must already contain the checked-out ggml submodule.
+# `COPY . /src` copies whatever is in the working tree; it does NOT run
+# `git submodule update`. So clone with submodules BEFORE building:
+#   git clone --recurse-submodules <this fork>
+#   cd <this fork>
+#   docker build -t omnivoice-pascal:1080ti .
+# A .dockerignore keeps .git/ (and any models/) out of the build context.
 # =============================================================================
 
 FROM nvidia/cuda:12.9.1-devel-ubuntu24.04 AS build
@@ -26,9 +32,10 @@ FROM nvidia/cuda:12.9.1-devel-ubuntu24.04 AS build
 ARG CMAKE_CUDA_ARCHITECTURES=61
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Build toolchain. The devel image already ships nvcc + the CUDA runtime headers
-# needed by the ggml CUDA backend, but the host still needs a C/C++ compiler,
-# git (to materialise the ggml submodule) and cmake.
+# Build toolchain. The devel image ships nvcc + the CUDA runtime headers the
+# ggml CUDA backend needs; we add a C/C++ compiler, cmake and pkg-config.
+# (git is harmless to keep; the ggml submodule is supplied via the build
+#  context, not fetched here — see the note above.)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         build-essential git ca-certificates cmake pkg-config && \
