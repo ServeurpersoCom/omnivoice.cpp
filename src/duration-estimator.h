@@ -1108,6 +1108,26 @@ static int duration_cat_lookup(uint32_t cp) {
     return -1;
 }
 
+// Weight multiplier for a Latin long (macron) vowel relative to a plain letter.
+#ifndef DUR_LONG_VOWEL_MULT
+#    define DUR_LONG_VOWEL_MULT 2.0f
+#endif
+
+// Precomposed macron vowels: A E I O U Y (upper and lower)
+static bool duration_is_macron_vowel(uint32_t cp) {
+    switch (cp) {
+        case 0x0100: case 0x0101:  // Ā ā
+        case 0x0112: case 0x0113:  // Ē ē
+        case 0x012A: case 0x012B:  // Ī ī
+        case 0x014C: case 0x014D:  // Ō ō
+        case 0x016A: case 0x016B:  // Ū ū
+        case 0x0232: case 0x0233:  // Ȳ ȳ
+            return true;
+        default:
+            return false;
+    }
+}
+
 // Weight for one codepoint, mirrors RuleDurationEstimator._get_char_weight.
 // Order of checks matches the Python reference exactly so the same
 // codepoint resolves to the same weight on both sides.
@@ -1123,6 +1143,19 @@ static float duration_get_char_weight(uint32_t cp) {
     // Arabic Tatweel: explicit pre-empt before the category check.
     if (cp == 0x0640) {
         return duration_weights[DUR_SCR_MARK];
+    }
+
+    // Classical Latin long vowels. A macron vowel lasts about twice a short
+    // one, so it counts DUR_LONG_VOWEL_MULT times a plain Latin letter.
+    // This is a deliberate divergence from upstream RuleDurationEstimator.
+    //  - Precomposed (NFC) macron vowels return the full multiplied weight.
+    //  - A combining macron U+0304 (NFD text) adds the extra on top of its
+    //    base letter, which already counted 1.0 (the mark would otherwise be 0).
+    if (duration_is_macron_vowel(cp)) {
+        return duration_weights[DUR_SCR_LATIN] * DUR_LONG_VOWEL_MULT;
+    }
+    if (cp == 0x0304) {
+        return duration_weights[DUR_SCR_LATIN] * (DUR_LONG_VOWEL_MULT - 1.0f);
     }
 
     // Unicode category check: M / P / S / Z / N short-circuit any
