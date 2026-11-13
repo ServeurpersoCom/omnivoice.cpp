@@ -18,9 +18,9 @@ services:
     restart: unless-stopped
 
     # tts-server lauscht intern auf 0.0.0.0:8080 und wird auf den Host
-    # gepublished (Port 8080).
+    # gepublished (Port 8015).
     ports:
-      - "8080:8080"
+      - "8015:8080"
 
     # Modelle: Host-Dateien, read-only, exakt dort wo sie schon liegen.
     volumes:
@@ -43,7 +43,7 @@ services:
       - --model
       - /opt/models/omnivoice-base-Q8_0.gguf
       - --codec
-      - /opt/models/omnivoice-tokenizer-F32.gguf
+      - /opt/models/omnivoice-tokenizer-Q8_0.gguf
       - --device
       - CUDA0
       - --host

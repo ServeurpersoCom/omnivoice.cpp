@@ -33,8 +33,8 @@ unchanged from upstream.
 | Host | `gputainer` (`ollama.ugin.herr-schreiber.com`) |
 | GPU | NVIDIA GTX 1080 Ti = **GPU 0** (`device_ids: ['0']`) |
 | Models | already on the host at **`/opt/models`** (mounted read-only) |
-| Model / codec | `omnivoice-base-Q8_0.gguf` / `omnivoice-tokenizer-F32.gguf` |
-| Port | `8080` (published to the host) |
+| Model / codec | `omnivoice-base-Q8_0.gguf` / `omnivoice-tokenizer-Q8_0.gguf` |
+| Port | `8015` on the host → `8080` in the container |
 
 ## Build
 
@@ -89,8 +89,8 @@ OpenAI-compatible, from `src/tts-server.h`:
 Smoke test once it is up:
 
 ```
-curl http://<gputainer>:8080/health
-curl -X POST http://<gputainer>:8080/v1/audio/speech \
+curl http://<gputainer>:8015/health
+curl -X POST http://<gputainer>:8015/v1/audio/speech \
      -H "Content-Type: application/json" \
      -d '{"model":"omnivoice","input":"Hallo Welt.","voice":"default","format":"wav"}' \
      -o out.wav
