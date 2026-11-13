@@ -130,20 +130,20 @@ std::vector<float> pipeline_tts_llm_forward(PipelineTTS *   pt,
         }
     }
 
-    // Convert int 0/1 attention mask to F16 additive bias matching the Python
-    // reference. OmniVoice passes a boolean attention_mask to transformers,
-    // which promotes True/False to 1.0/0.0 floats and adds it to the attention
-    // scores: allowed positions get a +1.0 boost, blocked positions stay at
-    // 0.0. This is not a hard mask: every position still contributes to the
-    // softmax, the model was trained against this exact bias semantics.
-    // F16 is the type expected by ggml_flash_attn_ext, and 1.0 / 0.0 are
-    // representable exactly in F16 so there is no precision loss.
+    // Convert int 0/1 attention mask to an F16 additive bias: 0.0 where
+    // allowed, -inf where blocked. OmniVoice passes a boolean attention_mask
+    // to transformers. With the default "sdpa" attention (and "flex_attention"
+    // used in training) a boolean mask is a hard mask: blocked keys get no
+    // weight at all. Only "eager" attention adds the boolean as a 1.0 / 0.0
+    // float, which lets padding leak into the softmax. Padded uncond rows keep
+    // a True diagonal (prompt_tts_build), so no row is fully masked.
+    // 0.0 and -inf are exact in F16, as expected by ggml_flash_attn_ext.
     std::vector<uint16_t> attn_f16;
     if (attention_mask) {
         attn_f16.resize((size_t) S * (size_t) S);
         for (int sq = 0; sq < S; sq++) {
             for (int skv = 0; skv < S; skv++) {
-                float v = (attention_mask[(size_t) sq * (size_t) S + (size_t) skv] != 0) ? 1.0f : 0.0f;
+                float v = (attention_mask[(size_t) sq * (size_t) S + (size_t) skv] != 0) ? 0.0f : -INFINITY;
                 attn_f16[(size_t) sq * (size_t) S + (size_t) skv] = ggml_fp32_to_fp16(v);
             }
         }
@@ -323,12 +323,50 @@ void pipeline_tts_llm_batched_ctx_init(MaskgitBatchedCtx * ctx,
                                        const int32_t *     audio_mask,
                                        const int32_t *     attention_mask,
                                        int                 B_prime,
-                                       int                 S) {
+                                       int                 S,
+                                       bool                allow_packed) {
     ctx->B_prime        = B_prime;
     ctx->S              = S;
     ctx->audio_mask_raw = audio_mask;
     ctx->attn_mask_raw  = attention_mask;
     ctx->has_attn_mask  = (attention_mask != NULL);
+
+    ctx->packed = false;
+    ctx->U      = 0;
+    if (allow_packed && B_prime == 2 && attention_mask != NULL) {
+        // Uncond real length = audio tokens on row 1, which sit at [0, U).
+        int U = 0;
+        while (U < S && audio_mask[(size_t) S + U] != 0) {
+            U++;
+        }
+        if (U > 0) {
+            ctx->packed = true;
+            ctx->U      = U;
+            const int L = S + U;
+            ctx->L      = L;
+            ctx->mask_f.resize(L);
+            ctx->inv_mask_f.resize(L);
+            ctx->positions.resize(L);
+            for (int s = 0; s < L; s++) {
+                int m              = (s < S) ? (audio_mask[s] != 0) : 1;
+                ctx->mask_f[s]     = (float) m;
+                ctx->inv_mask_f[s] = (float) (1 - m);
+                ctx->positions[s]  = (s < S) ? s : s - S;
+            }
+            // 0 inside each block (cond and uncond attend only to themselves),
+            // -inf across. Inside the blocks the reference mask is all ones.
+            const uint16_t f16_allow = ggml_fp32_to_fp16(0.0f);
+            const uint16_t f16_block = ggml_fp32_to_fp16(-INFINITY);
+            ctx->attn_f16.assign((size_t) L * (size_t) L, f16_block);
+            for (int q = 0; q < L; q++) {
+                const int lo = (q < S) ? 0 : S;
+                const int hi = (q < S) ? S : L;
+                std::fill(ctx->attn_f16.begin() + (size_t) q * L + lo, ctx->attn_f16.begin() + (size_t) q * L + hi,
+                          f16_allow);
+            }
+            return;
+        }
+    }
 
     ctx->mask_f.resize((size_t) B_prime * (size_t) S);
     ctx->inv_mask_f.resize((size_t) B_prime * (size_t) S);
@@ -345,16 +383,16 @@ void pipeline_tts_llm_batched_ctx_init(MaskgitBatchedCtx * ctx,
         ctx->positions[i] = i;
     }
 
-    // The mask only takes two values (1.0 and 0.0). Pre-convert them once
+    // The mask only takes two values (0.0 and -inf). Pre-convert them once
     // instead of calling ggml_fp32_to_fp16 in the inner loop, which dominates
     // the CPU pre-compute on large S.
     if (ctx->has_attn_mask) {
-        const uint16_t f16_one  = ggml_fp32_to_fp16(1.0f);
-        const uint16_t f16_zero = ggml_fp32_to_fp16(0.0f);
-        const size_t   n        = (size_t) B_prime * (size_t) S * (size_t) S;
+        const uint16_t f16_allow = ggml_fp32_to_fp16(0.0f);
+        const uint16_t f16_block = ggml_fp32_to_fp16(-INFINITY);
+        const size_t   n         = (size_t) B_prime * (size_t) S * (size_t) S;
         ctx->attn_f16.resize(n);
         for (size_t i = 0; i < n; i++) {
-            ctx->attn_f16[i] = (attention_mask[i] != 0) ? f16_one : f16_zero;
+            ctx->attn_f16[i] = (attention_mask[i] != 0) ? f16_allow : f16_block;
         }
     } else {
         ctx->attn_f16.clear();
@@ -364,6 +402,148 @@ void pipeline_tts_llm_batched_ctx_init(MaskgitBatchedCtx * ctx,
 // Build the static batched LM graph for one shape and allocate it once through
 // the scheduler. A prior graph of a different shape is torn down first. The
 // inputs stay unset here: the replay uploads them before every compute.
+// Packed CFG graph: one sequence of L = S + U tokens, B = 1. Only the 2 * T
+// audio positions [S - T, S + T) go through the final norm and audio_heads;
+// they are contiguous, so the output is cond [V, K, T] then uncond [V, K, T],
+// the same layout as the padded path.
+static bool lm_packed_graph_build(PipelineTTS * pt, MaskgitBatchedCtx * ctx, int K, int T_audio) {
+    const Qwen3Config & cfg = pt->lm.cfg;
+    const int           H   = cfg.hidden_size;
+    const int           S   = ctx->S;
+    const int           L   = ctx->L;
+
+    if (ctx->lm_gctx) {
+        static_graph_release(&ctx->lm_graph, pt->sched);
+        ggml_free(ctx->lm_gctx);
+        ctx->lm_gctx = nullptr;
+    }
+    const int    n_max_nodes    = 8192;
+    const size_t graph_ctx_size = ggml_tensor_overhead() * n_max_nodes + ggml_graph_overhead_custom(n_max_nodes, false);
+    struct ggml_init_params gp  = { graph_ctx_size, NULL, /*no_alloc=*/true };
+    struct ggml_context *   gctx = ggml_init(gp);
+    if (!gctx) {
+        return false;
+    }
+
+    struct ggml_tensor * t_text_ids = ggml_new_tensor_1d(gctx, GGML_TYPE_I32, L);
+    ggml_set_name(t_text_ids, "text_ids");
+    ggml_set_input(t_text_ids);
+    struct ggml_tensor * t_shifted = ggml_new_tensor_2d(gctx, GGML_TYPE_I32, L, K);
+    ggml_set_name(t_shifted, "shifted_ids");
+    ggml_set_input(t_shifted);
+    struct ggml_tensor * t_mask = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, 1, L);
+    ggml_set_name(t_mask, "mask");
+    ggml_set_input(t_mask);
+    ggml_set_output(t_mask);
+    struct ggml_tensor * t_inv_mask = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, 1, L);
+    ggml_set_name(t_inv_mask, "inv_mask");
+    ggml_set_input(t_inv_mask);
+    ggml_set_output(t_inv_mask);
+    struct ggml_tensor * t_positions = ggml_new_tensor_1d(gctx, GGML_TYPE_I32, L);
+    ggml_set_name(t_positions, "positions");
+    ggml_set_input(t_positions);
+    ggml_set_output(t_positions);
+    struct ggml_tensor * t_attn = ggml_new_tensor_2d(gctx, GGML_TYPE_F16, L, L);
+    ggml_set_name(t_attn, "attn_mask");
+    ggml_set_input(t_attn);
+    ggml_set_output(t_attn);
+
+    struct ggml_tensor * text_embeds  = ggml_get_rows(gctx, pt->lm.embed_tokens, t_text_ids);
+    struct ggml_tensor * audio_embeds = NULL;
+    for (int k = 0; k < K; k++) {
+        struct ggml_tensor * idx_k = ggml_view_1d(gctx, t_shifted, L, (size_t) k * (size_t) L * sizeof(int32_t));
+        struct ggml_tensor * emb_k = ggml_get_rows(gctx, pt->lm.audio_embeddings, idx_k);
+        audio_embeds               = (k == 0) ? emb_k : ggml_add(gctx, audio_embeds, emb_k);
+    }
+    struct ggml_tensor * inputs_embeds =
+        ggml_add(gctx, ggml_mul(gctx, text_embeds, t_inv_mask), ggml_mul(gctx, audio_embeds, t_mask));
+
+    // Stack without the final norm, then norm + heads on the audio window only.
+    struct ggml_tensor * hidden = inputs_embeds;
+    for (int i = 0; i < cfg.n_layers; i++) {
+        hidden = qwen3_build_layer(gctx, cfg, &pt->lm.layers[i], hidden, t_positions, t_attn, L, pt->use_flash_attn,
+                                   pt->clamp_fp16, nullptr, 1);
+    }
+    struct ggml_tensor * win =
+        ggml_view_2d(gctx, hidden, H, 2 * T_audio, hidden->nb[1], (size_t) (S - T_audio) * hidden->nb[1]);
+    win                         = qwen3_rms_norm(gctx, win, pt->lm.final_norm, cfg.rms_norm_eps);
+    struct ggml_tensor * logits = ggml_mul_mat(gctx, pt->lm.audio_heads, win);  // [V*K, 2T]
+    ggml_set_name(logits, "audio_logits_packed");
+    ggml_set_output(logits);
+
+    struct ggml_cgraph * graph = ggml_new_graph_custom(gctx, n_max_nodes, false);
+    ggml_build_forward_expand(graph, logits);
+    if (!static_graph_alloc(&ctx->lm_graph, pt->backend, pt->sched, graph)) {
+        ov_log(OV_LOG_ERROR, "[LM-Forward-Packed] sched_alloc_graph failed (K=%d L=%d)", K, L);
+        ggml_free(gctx);
+        return false;
+    }
+    ctx->lm_gctx         = gctx;
+    ctx->lm_gf           = graph;
+    ctx->lm_text_ids     = t_text_ids;
+    ctx->lm_shifted      = t_shifted;
+    ctx->lm_mask         = t_mask;
+    ctx->lm_inv_mask     = t_inv_mask;
+    ctx->lm_positions    = t_positions;
+    ctx->lm_attn         = t_attn;
+    ctx->lm_cond_audio   = nullptr;
+    ctx->lm_uncond_audio = nullptr;
+    ctx->lm_logits       = logits;
+    ctx->lm_key_K        = K;
+    ctx->lm_key_T_audio  = T_audio;
+    if (ctx->lm_graph.direct) {
+        ggml_backend_tensor_set(t_mask, ctx->mask_f.data(), 0, (size_t) L * sizeof(float));
+        ggml_backend_tensor_set(t_inv_mask, ctx->inv_mask_f.data(), 0, (size_t) L * sizeof(float));
+        ggml_backend_tensor_set(t_positions, ctx->positions.data(), 0, (size_t) L * sizeof(int32_t));
+        ggml_backend_tensor_set(t_attn, ctx->attn_f16.data(), 0, (size_t) L * (size_t) L * sizeof(uint16_t));
+    }
+    ctx->lm_built = true;
+    return true;
+}
+
+// Per-step packed forward: same contract as the batched audio-only path.
+static std::vector<float> lm_packed_forward(PipelineTTS *       pt,
+                                            const int32_t *     input_ids,
+                                            MaskgitBatchedCtx * ctx,
+                                            int                 K,
+                                            int                 T_audio) {
+    const int V = pt->lm.audio_vocab_size;
+    const int S = ctx->S;
+    const int L = ctx->L;
+    ctx->shifted.resize((size_t) K * (size_t) L);
+    ctx->text_ids.resize((size_t) L);
+    for (int s = 0; s < L; s++) {
+        const int b      = (s < S) ? 0 : 1;
+        const int col    = (s < S) ? s : s - S;
+        const int m      = (int) ctx->mask_f[s];
+        ctx->text_ids[s] = input_ids[((size_t) b * K + 0) * (size_t) S + col];
+        for (int k = 0; k < K; k++) {
+            ctx->shifted[(size_t) k * L + s] = input_ids[((size_t) b * K + k) * (size_t) S + col] * m + k * V;
+        }
+    }
+    if (!ctx->lm_built || ctx->lm_key_K != K || ctx->lm_key_T_audio != T_audio) {
+        if (!lm_packed_graph_build(pt, ctx, K, T_audio)) {
+            return {};
+        }
+    }
+    ggml_backend_tensor_set(ctx->lm_text_ids, ctx->text_ids.data(), 0, (size_t) L * sizeof(int32_t));
+    ggml_backend_tensor_set(ctx->lm_shifted, ctx->shifted.data(), 0, (size_t) K * (size_t) L * sizeof(int32_t));
+    if (!ctx->lm_graph.direct) {
+        ggml_backend_tensor_set(ctx->lm_mask, ctx->mask_f.data(), 0, (size_t) L * sizeof(float));
+        ggml_backend_tensor_set(ctx->lm_inv_mask, ctx->inv_mask_f.data(), 0, (size_t) L * sizeof(float));
+        ggml_backend_tensor_set(ctx->lm_positions, ctx->positions.data(), 0, (size_t) L * sizeof(int32_t));
+        ggml_backend_tensor_set(ctx->lm_attn, ctx->attn_f16.data(), 0, (size_t) L * (size_t) L * sizeof(uint16_t));
+    }
+    enum ggml_status st = static_graph_compute(&ctx->lm_graph, pt->backend, pt->sched, ctx->lm_gf);
+    if (st != GGML_STATUS_SUCCESS) {
+        ov_log(OV_LOG_ERROR, "[LM-Forward-Packed] graph_compute status=%d", (int) st);
+        return {};
+    }
+    std::vector<float> out((size_t) 2 * V * K * T_audio);
+    ggml_backend_tensor_get(ctx->lm_logits, out.data(), 0, out.size() * sizeof(float));
+    return out;
+}
+
 static bool lm_batched_graph_build(PipelineTTS * pt, MaskgitBatchedCtx * ctx, int K, int T_audio) {
     const Qwen3Config & cfg     = pt->lm.cfg;
     const int           V       = pt->lm.audio_vocab_size;
@@ -583,6 +763,15 @@ std::vector<float> pipeline_tts_llm_forward_batched(PipelineTTS *       pt,
             std::copy(logits_b.begin(), logits_b.end(), out.begin() + (size_t) b * per_item);
         }
         return out;
+    }
+
+    if (ctx->packed) {
+        // The packed buffers only fit the audio-only readout of the U window.
+        if (T_audio != ctx->U) {
+            ov_log(OV_LOG_ERROR, "[LM-Forward-Packed] T_audio=%d != U=%d", T_audio, ctx->U);
+            return {};
+        }
+        return lm_packed_forward(pt, input_ids, ctx, K, T_audio);
     }
 
     const int V = pt->lm.audio_vocab_size;

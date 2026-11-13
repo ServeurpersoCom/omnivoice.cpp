@@ -173,7 +173,7 @@ static std::vector<int32_t> maskgit_generate(PipelineTTS *         pt,
     // typical voice cloning shape), so building it once amortizes the cost.
     MaskgitBatchedCtx batched_ctx;
     pipeline_tts_llm_batched_ctx_init(&batched_ctx, prompt->audio_mask.data(), prompt->attention_mask.data(), B_prime,
-                                      S);
+                                      S, /*allow_packed=*/dump_dir == nullptr);
 
     for (int step = 0; step < cfg.num_step; step++) {
         int k_demask = sched[step];
