@@ -89,6 +89,14 @@ struct MaskgitBatchedCtx {
     const int32_t * audio_mask_raw;
     const int32_t * attn_mask_raw;
 
+    // Packed CFG: the cond row [0, S) and the real window [0, U) of the uncond
+    // row run as one sequence of S + U tokens with a block-diagonal 0/-inf
+    // mask, instead of two rows where the uncond one is padded to S. Same
+    // function as the padded path with the hard mask, without the padding.
+    bool packed = false;
+    int  U      = 0;
+    int  L      = 0;  // packed length S + U
+
     // Static LM graph replayed across the MaskGIT steps. The topology is fixed
     // within a request, so the graph is built once, allocated once directly when the backend supports every op,
     // otherwise through the scheduler, and replayed with a fresh input_ids upload per step. lm_key_K
@@ -119,7 +127,8 @@ void pipeline_tts_llm_batched_ctx_init(MaskgitBatchedCtx * ctx,
                                        const int32_t *     audio_mask,
                                        const int32_t *     attention_mask,
                                        int                 B_prime,
-                                       int                 S);
+                                       int                 S,
+                                       bool                allow_packed = true);
 
 // Batched version: runs B' independent forwards (cond + uncond stacked).
 // input_ids  [B', K, S]      row-major (b slow, k mid, s fast). Mutates

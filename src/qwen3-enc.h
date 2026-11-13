@@ -129,9 +129,21 @@ static struct ggml_tensor * qwen3_build_self_attn(struct ggml_context * ctx,
     // 1) Q/K/V projections (fused, partial, or separate). Output keeps the
     // batch dim trailing: [(q|kv)_dim, S] in 3D mode, [(q|kv)_dim, S, B] in 4D.
     struct ggml_tensor *q, *k, *v;
-    int                 q_dim  = Nh * D;
-    int                 kv_dim = Nkv * D;
-    if (ly->qkv) {
+    int                 q_dim    = Nh * D;
+    int                 kv_dim   = Nkv * D;
+    bool                heads_3d = false;  // q/k/v already shaped [D, X, S]
+    if (ly->qkv && B == 1) {
+        // Strided per-head views straight into the fused output: rms_norm only
+        // needs contiguous rows of D, so Q and K skip the copy. V keeps one
+        // copy because flash attention reads it as a dense tensor.
+        struct ggml_tensor * qkv = qwen3_linear(ctx, ly->qkv, x);
+        const size_t         es  = ggml_element_size(qkv);
+        q                        = ggml_view_3d(ctx, qkv, D, Nh, S, (size_t) D * es, qkv->nb[1], 0);
+        k                        = ggml_view_3d(ctx, qkv, D, Nkv, S, (size_t) D * es, qkv->nb[1], (size_t) q_dim * es);
+        v = ggml_cont(ctx,
+                      ggml_view_3d(ctx, qkv, D, Nkv, S, (size_t) D * es, qkv->nb[1], (size_t) (q_dim + kv_dim) * es));
+        heads_3d = true;
+    } else if (ly->qkv) {
         struct ggml_tensor * qkv = qwen3_linear(ctx, ly->qkv, x);
         if (B == 1) {
             q = ggml_cont(ctx, ggml_view_2d(ctx, qkv, q_dim, S, qkv->nb[1], 0));
@@ -163,7 +175,9 @@ static struct ggml_tensor * qwen3_build_self_attn(struct ggml_context * ctx,
     // 2) Reshape to heads. In 3D mode keep the existing [D, X, S] layout. In
     // 4D mode promote to [D, X, S, B] so the trailing batch dim flows through
     // every downstream op.
-    if (B == 1) {
+    if (heads_3d) {
+        // shaped by the views above
+    } else if (B == 1) {
         q = ggml_reshape_3d(ctx, q, D, Nh, S);
         k = ggml_reshape_3d(ctx, k, D, Nkv, S);
         v = ggml_reshape_3d(ctx, v, D, Nkv, S);
