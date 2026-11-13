@@ -36,6 +36,7 @@
 // callers only ever see `struct ov_context *`.
 struct ov_context {
     BackendPair   bp;
+    BackendPair   codec_bp;
     PipelineTTS   pt;
     PipelineCodec pc;
     BPETokenizer  tok;
@@ -261,7 +262,23 @@ struct ov_context * ov_init(const struct ov_init_params * params) {
         }
 
         if (params->codec_path) {
-            if (!pipeline_codec_load(&ov->pc, params->codec_path, ov->bp)) {
+            BackendPair codec_backend = ov->bp;
+            const char * codec_device = std::getenv("OV_CODEC_DEVICE");
+            if (codec_device && codec_device[0]) {
+                ov->codec_bp = backend_init("Codec", codec_device);
+                if (!ov->codec_bp.backend) { ov_throw("codec backend unavailable"); }
+                codec_backend = ov->codec_bp;
+                const char * codec_serial = std::getenv("OV_CODEC_SERIAL");
+                if (codec_serial && std::strcmp(codec_serial, "1") == 0) {
+                    auto dev = ggml_backend_get_device(codec_backend.backend);
+                    auto reg = ggml_backend_dev_backend_reg(dev);
+                    auto set_concurrency = (void (*)(ggml_backend_t, bool))ggml_backend_reg_get_proc_address(reg, "ggml_backend_metal_set_concurrency");
+                    if (!set_concurrency) { ov_throw("codec backend lacks Metal concurrency control"); }
+                    set_concurrency(codec_backend.backend, false);
+                    ov_log(OV_LOG_INFO, "[Codec] serialized Metal context; LM context unchanged");
+                }
+            }
+            if (!pipeline_codec_load(&ov->pc, params->codec_path, codec_backend)) {
                 ov_throw("ov_init: pipeline_codec_load failed for '%s'", params->codec_path);
             }
             ov->codec_loaded = true;
@@ -284,6 +301,7 @@ void ov_free(struct ov_context * ov) {
         pipeline_codec_free(&ov->pc);
     }
     pipeline_tts_free(&ov->pt);
+    backend_release(ov->codec_bp.backend, ov->codec_bp.cpu_backend);
     backend_release(ov->bp.backend, ov->bp.cpu_backend);
     delete ov;
 }

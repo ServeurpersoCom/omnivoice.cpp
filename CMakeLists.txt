@@ -199,3 +199,10 @@ target_include_directories(test-abi-c PRIVATE
 target_link_libraries(test-abi-c PRIVATE omnivoice-core)
 link_ggml_backends(test-abi-c)
 
+
+# Opt-in hardware regression test; requires a Metal device but no model files.
+option(OMNIVOICE_TEST_METAL_TRANSFERS "Build the Metal host-transfer regression test" OFF)
+if(OMNIVOICE_TEST_METAL_TRANSFERS)
+    add_executable(test-metal-unaligned tests/metal-unaligned.cpp)
+    link_ggml_backends(test-metal-unaligned)
+endif()
