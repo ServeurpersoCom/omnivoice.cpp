@@ -54,12 +54,26 @@ COPY . /src
 #   -DOMNIVOICE_SHARED=ON           : also emit libomnivoice.so (ABI consumers)
 #   -DCMAKE_BUILD_RPATH=$ORIGIN     : ggml .so backends resolve from the app dir
 #   --target tts-server             : stop after the one target we need to ship
+#
+# The CUDA *driver* API (cuMemCreate/cuMemMap/... used by ggml's VMM pool, and
+# cuDevice*/cuGetErrorString) links to libcuda.so.1. In a build container only the
+# CUDA *stub* provides it, at /usr/local/cuda/lib64/stubs/libcuda.so (SONAME
+# libcuda.so.1) — a dir the linker does not search by default, and the stub file is
+# named without the ".1" suffix that the NEEDED entry uses. So the *executable*
+# link of tts-server fails with "libcuda.so.1 ... not found / undefined reference to
+# cuMemCreate". Fix: symlink the stub to the soname, then add the stubs dir to the
+# linker search path. At runtime the NVIDIA container runtime injects the real driver,
+# so this is a pure build-time fix.
+# Make the stub discoverable by its SONAME (filename must match the NEEDED entry).
+RUN ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/stubs/libcuda.so.1
 RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
         -DGGML_CUDA=ON \
         -DCMAKE_CUDA_ARCHITECTURES="${CMAKE_CUDA_ARCHITECTURES}" \
         -DGGML_CUDA_NCCL=OFF \
         -DOMNIVOICE_SHARED=ON \
         '-DCMAKE_BUILD_RPATH=$ORIGIN' \
+        '-DCMAKE_EXE_LINKER_FLAGS=-Wl,--rpath-link,/usr/local/cuda/lib64/stubs' \
+        '-DCMAKE_SHARED_LINKER_FLAGS=-Wl,--rpath-link,/usr/local/cuda/lib64/stubs' \
     && cmake --build build --target tts-server -j"$(nproc)"
 
 # -----------------------------------------------------------------------------

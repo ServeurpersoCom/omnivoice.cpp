@@ -32,7 +32,7 @@ unchanged from upstream.
 |---|---|
 | Host | `gputainer` (`ollama.ugin.herr-schreiber.com`) |
 | GPU | NVIDIA GTX 1080 Ti = **GPU 0** (`device_ids: ['0']`) |
-| Models | already on the host at **`/opt/models`** (mounted read-only) |
+| Models | already on the host at **`/opt/1080ki/models`** (mounted read-only as `/opt/models`) |
 | Model / codec | `omnivoice-base-Q8_0.gguf` / `omnivoice-tokenizer-Q8_0.gguf` |
 | Port | `8015` on the host → `8080` in the container |
 
@@ -68,10 +68,10 @@ docker compose -f compose.yaml logs -f
 `compose.yaml` sets, for the `omnivoice` service:
 
 - `--model /opt/models/omnivoice-base-Q8_0.gguf`
-- `--codec /opt/models/omnivoice-tokenizer-F32.gguf`
+- `--codec /opt/models/omnivoice-tokenizer-Q8_0.gguf`
 - `--device CUDA0`            (the 1080 Ti, explicitly)
 - `--host 0.0.0.0 --port 8080`
-- `volumes: /opt/models:/opt/models:ro`
+- `volumes: /opt/1080ki/models:/opt/models:ro`
 - `deploy.resources.reservations.devices: driver nvidia, device_ids ['0']`
 - a `curl /health` liveness probe (`start_period: 60s` for model load)
 

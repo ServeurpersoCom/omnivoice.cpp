@@ -3,8 +3,8 @@
 #
 # Zielhost:   ollama.ugin.herr-schreiber.com  (a.k.a. "gputainer")
 #   - Die 1080 Ti ist GPU 0  ->  device_ids: ['0']
-#   - Die GGUF-Modelle liegen bereits auf dem Host unter /opt/models
-#     (read-only in den Container gemountet).
+#   - Die GGUF-Modelle liegen auf dem Host unter /opt/1080ki/models
+#     (read-only nach /opt/models in den Container gemountet).
 #
 # Image:      omnivoice-pascal:1080ti  (aus dem Dockerfile dieses Repos)
 #
@@ -22,9 +22,10 @@ services:
     ports:
       - "8015:8080"
 
-    # Modelle: Host-Dateien, read-only, exakt dort wo sie schon liegen.
+    # Modelle: Host-Dateien, read-only, exakt dort wo sie liegen
+    # (Host: /opt/1080ki/models  ->  Container: /opt/models).
     volumes:
-      - /opt/models:/opt/models:ro
+      - /opt/1080ki/models:/opt/models:ro
 
     # Pascal 1080 Ti = GPU 0. Explizit device_ids, nicht count.
     deploy:
