@@ -72,9 +72,14 @@ FROM nvidia/cuda:12.9.1-runtime-ubuntu24.04
 # the host, so there is nothing to install here to talk to the GPU.
 
 ENV DEBIAN_FRONTEND=noninteractive
-# Only extra runtime dependency is curl, used by the HEALTHCHECK below.
+# Runtime deps:
+#   curl     -> the HEALTHCHECK below
+#   libgomp1 -> the gcc OpenMP runtime (libgomp.so.1). tts-server / the ggml
+#               backends are built with -fopenmp; the build stage gets it via
+#               build-essential, but the slim CUDA *runtime* base image does
+#               NOT ship it, so the binary fails to load without it.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl && \
+    apt-get install -y --no-install-recommends curl libgomp1 && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
