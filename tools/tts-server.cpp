@@ -221,14 +221,17 @@ int main(int argc, char ** argv) {
         std::vector<int32_t> voice_codes;
         std::string          voice_ref_text;
         int                  voice_ref_T = 0;
+        // Work on a local copy of the voice name so we can normalise it
+        // without mutating the const request.
+        std::string vname = req.voice;
         // Treat the generic "default" voice name (sent by some OpenAI-style
         // clients) as "no voice" so it resolves to the default voice rather
         // than 400-ing as an unknown name.
-        if (req.voice == "default" || req.voice == "Default" || req.voice == "DEFAULT")
-            req.voice.clear();
-        if (!req.voice.empty()) {
+        if (vname == "default" || vname == "Default" || vname == "DEFAULT")
+            vname.clear();
+        if (!vname.empty()) {
             std::lock_guard<std::mutex> lock(g_voices_mutex);
-            auto                        vit = g_voices.find(req.voice);
+            auto                        vit = g_voices.find(vname);
             if (vit == g_voices.end()) {
                 // Unknown voice (e.g. OpenAI names like "alloy" sent by
                 // Open-WebUI): fall back to voice design when "instructions"
@@ -237,13 +240,13 @@ int main(int argc, char ** argv) {
                 if (req.instructions.empty()) {
                     fprintf(stderr,
                             "[Server] voice '%s' not registered, using default voice\n",
-                            req.voice.c_str());
-                    req.voice.clear();
+                            vname.c_str());
+                    vname.clear();
                 } else {
                     fprintf(stderr,
                             "[Server] voice '%s' not registered, falling back to voice design\n",
-                            req.voice.c_str());
-                    req.voice.clear();
+                            vname.c_str());
+                    vname.clear();
                 }
             } else {
                 const voice_entry & v = vit->second;
