@@ -139,3 +139,28 @@ Newest CUDA that still ships a Pascal (`sm_61`) target. CUDA 13 dropped the
 MIT (code); models OmniVoice (Xiaomi / k2-fsa, Apache-2.0) + Higgs Audio v2
 tokenizer (Apache-2.0). See upstream `docs/ARCHITECTURE.md` for the full
 model / pipeline / API reference.
+## Voices
+
+Omnivoice has **no built-in OpenAI voice names** (alloy / nova / echo / …).
+The voice registry is empty by default. Three ways to pick a voice:
+
+| Mode | Request | Result |
+|------|---------|--------|
+| **Default** | `{"input":"…"}` (no `voice`) | the model's default voice |
+| **Voice-design** | `{"input":"…","instructions":"male, moderate pitch, british accent"}` | a designed voice from the `instructions` vocabulary |
+| **Cloned** | `POST /v1/audio/voices` to register, then `{"input":"…","voice":"<name>"}` | a cloned reference voice |
+
+### Open-WebUI behaviour
+
+Open-WebUI's voice dropdown sends `voice:"alloy"` (or another OpenAI name)
+**without** an `instructions` field. The fork handles this so the dropdown works
+out of the box:
+
+* `voice:"default"` (any casing) → treated as "no voice" → **default voice**.
+* any other unknown `voice` **with** `instructions` → **voice-design** fallback.
+* any other unknown `voice` **without** `instructions` → **default voice**
+  (no 400).
+
+So in Open-WebUI you can leave the voice at `default` (or any name) and get
+the default voice; to control timbre, set `instructions` to a voice-design
+vocabulary string (see `src/voice-design.h` for the accepted terms).

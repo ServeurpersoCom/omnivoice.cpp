@@ -221,20 +221,30 @@ int main(int argc, char ** argv) {
         std::vector<int32_t> voice_codes;
         std::string          voice_ref_text;
         int                  voice_ref_T = 0;
+        // Treat the generic "default" voice name (sent by some OpenAI-style
+        // clients) as "no voice" so it resolves to the default voice rather
+        // than 400-ing as an unknown name.
+        if (req.voice == "default" || req.voice == "Default" || req.voice == "DEFAULT")
+            req.voice.clear();
         if (!req.voice.empty()) {
             std::lock_guard<std::mutex> lock(g_voices_mutex);
             auto                        vit = g_voices.find(req.voice);
             if (vit == g_voices.end()) {
                 // Unknown voice (e.g. OpenAI names like "alloy" sent by
-                // Open-WebUI): fall back to voice design (driven by the
-                // "instructions" field) instead of 400-ing, so OpenAI-style
-                // clients work out of the box.
+                // Open-WebUI): fall back to voice design when "instructions"
+                // is present; otherwise use the default voice instead of
+                // 400-ing, so OpenAI-style clients work out of the box.
                 if (req.instructions.empty()) {
-                    err = "unknown voice '" + req.voice + "' (no instructions for voice design)";
-                    return (int) OV_STATUS_INVALID_PARAMS;
+                    fprintf(stderr,
+                            "[Server] voice '%s' not registered, using default voice\n",
+                            req.voice.c_str());
+                    req.voice.clear();
+                } else {
+                    fprintf(stderr,
+                            "[Server] voice '%s' not registered, falling back to voice design\n",
+                            req.voice.c_str());
+                    req.voice.clear();
                 }
-                fprintf(stderr, "[Server] voice '%s' not registered, falling back to voice design\n",
-                        req.voice.c_str());
             } else {
                 const voice_entry & v = vit->second;
                 voice_codes.assign(v.ref.ref_codes, v.ref.ref_codes + (size_t) v.ref.num_codebooks * (size_t) v.ref.ref_T);
