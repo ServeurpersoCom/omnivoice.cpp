@@ -22,6 +22,12 @@ build to `sm_61` and ships a Docker build + compose file for that target.
    slim) producing `tts-server` + the ggml backend `.so` files.
 5. **`compose.yaml`** — deploys the server on the GPU host with the 1080 Ti
    reserved as **GPU 0** and the GGUFs mounted read-only from the host.
+6. **OpenAI-client compatibility** in the speech endpoint:
+   - `response_format: "mp3"` is accepted and served as RIFF/WAV (OpenAI-style
+     clients such as Open-WebUI default to `mp3`; the engine emits WAV).
+   - an **unregistered** `voice` (e.g. `alloy` from Open-WebUI) no longer 400s —
+     it falls back to **voice design** from `instructions` (and only errors when
+     `instructions` is also empty, so a bare unknown voice is still reported).
 
 Everything else (the C++ core, the OpenAI endpoints, the voice registry) is
 unchanged from upstream.
@@ -92,10 +98,23 @@ Notes on the speech request (verified against `src/tts-server.h`):
 - **`response_format`** (not `format`) selects `wav` (one-shot RIFF file) or
   `pcm` (default: raw s16le 24 kHz mono stream).
 - **`voice`**: empty/omitted runs **voice design** from the `instructions`
-  field; a non-empty `voice` must name a **registered** cloned voice
-  (`POST /v1/audio/voices`) — there is no built-in "default" voice.
-- `instructions` for voice design is a short descriptor (e.g.
-  `"male, moderate pitch, british accent"`).
+  field. A non-empty `voice` first looks up a **registered** cloned voice
+  (`POST /v1/audio/voices`); if the name is **not registered** (e.g. OpenAI
+  names like `alloy` sent by Open-WebUI) it falls back to voice design from
+  `instructions` — it only errors when `instructions` is also empty. There is
+  no built-in "default" voice.
+- `instructions` for voice design is a **fixed-vocabulary** descriptor
+  (see `src/voice-design.h`):
+  - gender: `male` / `female`
+  - age: `child` / `teenager` / `young adult` / `middle-aged` / `elderly`
+  - pitch: `very low pitch` / `low pitch` / `moderate pitch` / `high pitch` /
+    `very high pitch`
+  - style: `whisper`
+  - accents: `american accent` / `british accent` / `australian accent` /
+    `chinese accent` / `canadian accent` / `indian accent` / `korean accent` /
+    `portuguese accent` / `russian accent` / `japanese accent`
+  - (plus a set of Chinese dialects, e.g. `东北话`, `四川话`, …)
+  Example: `"male, moderate pitch, british accent"`.
 
 Smoke test once it is up:
 

@@ -225,13 +225,22 @@ int main(int argc, char ** argv) {
             std::lock_guard<std::mutex> lock(g_voices_mutex);
             auto                        vit = g_voices.find(req.voice);
             if (vit == g_voices.end()) {
-                err = "unknown voice '" + req.voice + "'";
-                return (int) OV_STATUS_INVALID_PARAMS;
+                // Unknown voice (e.g. OpenAI names like "alloy" sent by
+                // Open-WebUI): fall back to voice design (driven by the
+                // "instructions" field) instead of 400-ing, so OpenAI-style
+                // clients work out of the box.
+                if (req.instructions.empty()) {
+                    err = "unknown voice '" + req.voice + "' (no instructions for voice design)";
+                    return (int) OV_STATUS_INVALID_PARAMS;
+                }
+                fprintf(stderr, "[Server] voice '%s' not registered, falling back to voice design\n",
+                        req.voice.c_str());
+            } else {
+                const voice_entry & v = vit->second;
+                voice_codes.assign(v.ref.ref_codes, v.ref.ref_codes + (size_t) v.ref.num_codebooks * (size_t) v.ref.ref_T);
+                voice_ref_T    = v.ref.ref_T;
+                voice_ref_text = v.ref_text;
             }
-            const voice_entry & v = vit->second;
-            voice_codes.assign(v.ref.ref_codes, v.ref.ref_codes + (size_t) v.ref.num_codebooks * (size_t) v.ref.ref_T);
-            voice_ref_T    = v.ref.ref_T;
-            voice_ref_text = v.ref_text;
         }
         if (!voice_codes.empty()) {
             p.ref_audio_tokens = voice_codes.data();
