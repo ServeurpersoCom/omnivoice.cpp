@@ -82,9 +82,20 @@ If your GGUFs on the host have different filenames, only the two `--model` /
 
 OpenAI-compatible, from `src/tts-server.h`:
 
-- `POST /v1/audio/speech` — `{"input": "...", "voice": "...", "response_format": "wav"}`
+- `POST /v1/audio/speech` — `{"input": "...", "instructions": "...", "response_format": "wav"}`
+  (or `"voice": "<registered>"` for a cloned voice)
 - `POST /v1/audio/voices` — register a cloned voice (WAV or `.rvq`), selected by name
 - `GET  /v1/models`, `GET /health`
+
+Notes on the speech request (verified against `src/tts-server.h`):
+
+- **`response_format`** (not `format`) selects `wav` (one-shot RIFF file) or
+  `pcm` (default: raw s16le 24 kHz mono stream).
+- **`voice`**: empty/omitted runs **voice design** from the `instructions`
+  field; a non-empty `voice` must name a **registered** cloned voice
+  (`POST /v1/audio/voices`) — there is no built-in "default" voice.
+- `instructions` for voice design is a short descriptor (e.g.
+  `"male, moderate pitch, british accent"`).
 
 Smoke test once it is up:
 
@@ -92,9 +103,12 @@ Smoke test once it is up:
 curl http://<gputainer>:8015/health
 curl -X POST http://<gputainer>:8015/v1/audio/speech \
      -H "Content-Type: application/json" \
-     -d '{"model":"omnivoice","input":"Hallo Welt.","voice":"default","format":"wav"}' \
+     -d '{"model":"omnivoice","input":"Hallo Welt.","instructions":"male, moderate pitch, british accent","response_format":"wav"}' \
      -o out.wav
 ```
+
+Verified on the 1080 Ti: `RIFF` PCM16 24 kHz mono, ~3.5 s audio,
+`[Perf] Total ~1.6 s (RTF 0.46)` — i.e. ~2.2x faster than real time.
 
 ## Why CUDA 12.9
 
