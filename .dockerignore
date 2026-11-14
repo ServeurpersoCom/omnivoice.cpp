@@ -1,0 +1,13 @@
+# Keep the Docker build context lean. The ggml submodule IS required (it is
+# compiled), so do NOT ignore it. Ignore only the VCS metadata, any local
+# model downloads, and build artifacts.
+.git
+.gitattributes
+.gitignore
+models/
+build/
+*.o
+*.so
+*.a
+README.md
+compose.yaml

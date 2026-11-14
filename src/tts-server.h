@@ -165,6 +165,10 @@ static bool tts_parse_request(const std::string & body, tts_request & req, std::
 
     yyjson_val * fmt = yyjson_obj_get(root, "response_format");
     req.format       = yyjson_is_str(fmt) ? yyjson_get_str(fmt) : "pcm";
+    // OpenAI-compatible clients (e.g. Open-WebUI) default to "mp3". The
+    // engine emits RIFF/WAV, so map mp3 -> wav instead of 400-ing.
+    if (req.format == "mp3")
+        req.format = "wav";
 
     yyjson_val * seed = yyjson_obj_get(root, "seed");
     if (seed && !yyjson_is_int(seed)) {

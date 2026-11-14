@@ -221,17 +221,39 @@ int main(int argc, char ** argv) {
         std::vector<int32_t> voice_codes;
         std::string          voice_ref_text;
         int                  voice_ref_T = 0;
-        if (!req.voice.empty()) {
+        // Work on a local copy of the voice name so we can normalise it
+        // without mutating the const request.
+        std::string vname = req.voice;
+        // Treat the generic "default" voice name (sent by some OpenAI-style
+        // clients) as "no voice" so it resolves to the default voice rather
+        // than 400-ing as an unknown name.
+        if (vname == "default" || vname == "Default" || vname == "DEFAULT")
+            vname.clear();
+        if (!vname.empty()) {
             std::lock_guard<std::mutex> lock(g_voices_mutex);
-            auto                        vit = g_voices.find(req.voice);
+            auto                        vit = g_voices.find(vname);
             if (vit == g_voices.end()) {
-                err = "unknown voice '" + req.voice + "'";
-                return (int) OV_STATUS_INVALID_PARAMS;
+                // Unknown voice (e.g. OpenAI names like "alloy" sent by
+                // Open-WebUI): fall back to voice design when "instructions"
+                // is present; otherwise use the default voice instead of
+                // 400-ing, so OpenAI-style clients work out of the box.
+                if (req.instructions.empty()) {
+                    fprintf(stderr,
+                            "[Server] voice '%s' not registered, using default voice\n",
+                            vname.c_str());
+                    vname.clear();
+                } else {
+                    fprintf(stderr,
+                            "[Server] voice '%s' not registered, falling back to voice design\n",
+                            vname.c_str());
+                    vname.clear();
+                }
+            } else {
+                const voice_entry & v = vit->second;
+                voice_codes.assign(v.ref.ref_codes, v.ref.ref_codes + (size_t) v.ref.num_codebooks * (size_t) v.ref.ref_T);
+                voice_ref_T    = v.ref.ref_T;
+                voice_ref_text = v.ref_text;
             }
-            const voice_entry & v = vit->second;
-            voice_codes.assign(v.ref.ref_codes, v.ref.ref_codes + (size_t) v.ref.num_codebooks * (size_t) v.ref.ref_T);
-            voice_ref_T    = v.ref.ref_T;
-            voice_ref_text = v.ref_text;
         }
         if (!voice_codes.empty()) {
             p.ref_audio_tokens = voice_codes.data();

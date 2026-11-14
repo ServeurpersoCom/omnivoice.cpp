@@ -1,0 +1,44 @@
+# =============================================================================
+# omnivoice.cpp — tts-server auf der NAS (nas01, CPU-Backend)
+#
+# Die NAS hat KEINE NVIDIA-GPU (keine /dev/nvidia*, kein PCI 0x10de)
+# -> ggml-CPU-Backend (im Image enthalten, CPU-Threads).
+#
+#   - Modelle:  /opt/1080ki/models (auf der NAS, read-only nach /opt/models)
+#   - Port:     8015 -> 8080 (intern)
+#
+# Deploy:
+#   1) Image omnivoice-pascal:1080ti muss auf der NAS existieren
+#      (Transfer vom GPU-Host: docker save -> POST /images/load)
+#   2) docker compose -f compose.nas.yaml up -d
+#
+# Hinweis: CPU-Deployment ist deutlich langsamer als die 1080 Ti
+# (RTF ~0.5 auf GPU, ~3-5 auf 4 CPU-Kernen) — für Produktivbetrieb
+# bleibt der GPU-Host der primäre.
+# =============================================================================
+services:
+  omnivoice:
+    image: omnivoice-pascal:1080ti
+    container_name: omnivoice
+    command:
+      - --model
+      - /opt/models/omnivoice-base-Q8_0.gguf
+      - --codec
+      - /opt/models/omnivoice-tokenizer-Q8_0.gguf
+      - --device
+      - CPU
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+    ports:
+      - "8015:8080"
+    volumes:
+      - /opt/1080ki/models:/opt/models:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+    restart: unless-stopped
