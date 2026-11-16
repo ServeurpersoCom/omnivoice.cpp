@@ -126,51 +126,35 @@ static struct ggml_tensor * qwen3_build_self_attn(struct ggml_context * ctx,
     int Nh  = c.n_heads;
     int Nkv = c.n_kv_heads;
 
-    // 1) Q/K/V projections (fused, partial, or separate). Output keeps the
-    // batch dim trailing: [(q|kv)_dim, S] in 3D mode, [(q|kv)_dim, S, B] in 4D.
+    // 1) Q/K/V projections (fused, partial, or separate), split into heads with
+    // the batch dim trailing: [D, X, S] in 3D mode, [D, X, S, B] in 4D. The
+    // heads of a fused projection are views: the QK-Norm writes fresh Q and K,
+    // the attention reads V through its strides.
     struct ggml_tensor *q, *k, *v;
     int                 q_dim  = Nh * D;
     int                 kv_dim = Nkv * D;
+    auto                heads  = [&](struct ggml_tensor * t, int n, size_t offset) {
+        size_t es = ggml_element_size(t);
+        return B == 1 ? ggml_view_3d(ctx, t, D, n, S, D * es, t->nb[1], offset * es) :
+                                        ggml_view_4d(ctx, t, D, n, S, B, D * es, t->nb[1], t->nb[2], offset * es);
+    };
+    auto reshape = [&](struct ggml_tensor * t, int n) {
+        return B == 1 ? ggml_reshape_3d(ctx, t, D, n, S) : ggml_reshape_4d(ctx, t, D, n, S, B);
+    };
     if (ly->qkv) {
         struct ggml_tensor * qkv = qwen3_linear(ctx, ly->qkv, x);
-        if (B == 1) {
-            q = ggml_cont(ctx, ggml_view_2d(ctx, qkv, q_dim, S, qkv->nb[1], 0));
-            k = ggml_cont(ctx, ggml_view_2d(ctx, qkv, kv_dim, S, qkv->nb[1], (size_t) q_dim * qkv->nb[0]));
-            v = ggml_cont(ctx, ggml_view_2d(ctx, qkv, kv_dim, S, qkv->nb[1], (size_t) (q_dim + kv_dim) * qkv->nb[0]));
-        } else {
-            q = ggml_cont(ctx, ggml_view_3d(ctx, qkv, q_dim, S, B, qkv->nb[1], qkv->nb[2], 0));
-            k = ggml_cont(ctx,
-                          ggml_view_3d(ctx, qkv, kv_dim, S, B, qkv->nb[1], qkv->nb[2], (size_t) q_dim * qkv->nb[0]));
-            v = ggml_cont(ctx, ggml_view_3d(ctx, qkv, kv_dim, S, B, qkv->nb[1], qkv->nb[2],
-                                            (size_t) (q_dim + kv_dim) * qkv->nb[0]));
-        }
+        q                        = heads(qkv, Nh, 0);
+        k                        = heads(qkv, Nkv, q_dim);
+        v                        = heads(qkv, Nkv, q_dim + kv_dim);
     } else if (ly->qk) {
         struct ggml_tensor * qk = qwen3_linear(ctx, ly->qk, x);
-        if (B == 1) {
-            q = ggml_cont(ctx, ggml_view_2d(ctx, qk, q_dim, S, qk->nb[1], 0));
-            k = ggml_cont(ctx, ggml_view_2d(ctx, qk, kv_dim, S, qk->nb[1], (size_t) q_dim * qk->nb[0]));
-        } else {
-            q = ggml_cont(ctx, ggml_view_3d(ctx, qk, q_dim, S, B, qk->nb[1], qk->nb[2], 0));
-            k = ggml_cont(ctx, ggml_view_3d(ctx, qk, kv_dim, S, B, qk->nb[1], qk->nb[2], (size_t) q_dim * qk->nb[0]));
-        }
-        v = qwen3_linear(ctx, ly->v_proj, x);
+        q                       = heads(qk, Nh, 0);
+        k                       = heads(qk, Nkv, q_dim);
+        v                       = reshape(qwen3_linear(ctx, ly->v_proj, x), Nkv);
     } else {
-        q = qwen3_linear(ctx, ly->q_proj, x);
-        k = qwen3_linear(ctx, ly->k_proj, x);
-        v = qwen3_linear(ctx, ly->v_proj, x);
-    }
-
-    // 2) Reshape to heads. In 3D mode keep the existing [D, X, S] layout. In
-    // 4D mode promote to [D, X, S, B] so the trailing batch dim flows through
-    // every downstream op.
-    if (B == 1) {
-        q = ggml_reshape_3d(ctx, q, D, Nh, S);
-        k = ggml_reshape_3d(ctx, k, D, Nkv, S);
-        v = ggml_reshape_3d(ctx, v, D, Nkv, S);
-    } else {
-        q = ggml_reshape_4d(ctx, q, D, Nh, S, B);
-        k = ggml_reshape_4d(ctx, k, D, Nkv, S, B);
-        v = ggml_reshape_4d(ctx, v, D, Nkv, S, B);
+        q = reshape(qwen3_linear(ctx, ly->q_proj, x), Nh);
+        k = reshape(qwen3_linear(ctx, ly->k_proj, x), Nkv);
+        v = reshape(qwen3_linear(ctx, ly->v_proj, x), Nkv);
     }
 
     // 3) QK-Norm: per-head RMSNorm on D, identical in 3D and 4D.
