@@ -338,6 +338,7 @@ static const std::pair<const char *, const char *> LANG_NAME_TO_ID_TABLE[] = {
     { "larike-wakasihu",                                            "alo" },
     { "lasi",                                                       "lss" },
     { "latgalian",                                                  "ltg" },
+    { "latin",                                                      "la"  },
     { "latvian",                                                    "lv"  },
     { "levantine arabic",                                           "apc" },
     { "liana-seti",                                                 "ste" },
