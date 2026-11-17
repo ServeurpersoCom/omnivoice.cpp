@@ -409,7 +409,7 @@ def main():
     model  = OmniVoice.from_pretrained(
         CKPT,
         torch_dtype=torch.float32,
-        attn_implementation="eager",
+        attn_implementation="sdpa",
     ).to(device).eval()
     install_hooks(model, DUMP_PT)
     gen_kwargs = dict(

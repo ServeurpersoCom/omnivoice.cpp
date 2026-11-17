@@ -130,20 +130,20 @@ std::vector<float> pipeline_tts_llm_forward(PipelineTTS *   pt,
         }
     }
 
-    // Convert int 0/1 attention mask to F16 additive bias matching the Python
-    // reference. OmniVoice passes a boolean attention_mask to transformers,
-    // which promotes True/False to 1.0/0.0 floats and adds it to the attention
-    // scores: allowed positions get a +1.0 boost, blocked positions stay at
-    // 0.0. This is not a hard mask: every position still contributes to the
-    // softmax, the model was trained against this exact bias semantics.
-    // F16 is the type expected by ggml_flash_attn_ext, and 1.0 / 0.0 are
-    // representable exactly in F16 so there is no precision loss.
+    // Convert int 0/1 attention mask to an F16 additive bias: 0.0 where
+    // allowed, -inf where blocked. OmniVoice passes a boolean attention_mask
+    // to transformers. With the default "sdpa" attention (and "flex_attention"
+    // used in training) a boolean mask is a hard mask: blocked keys get no
+    // weight at all. Only "eager" attention adds the boolean as a 1.0 / 0.0
+    // float, which lets padding leak into the softmax. Padded uncond rows keep
+    // a True diagonal (prompt_tts_build), so no row is fully masked.
+    // 0.0 and -inf are exact in F16, as expected by ggml_flash_attn_ext.
     std::vector<uint16_t> attn_f16;
     if (attention_mask) {
         attn_f16.resize((size_t) S * (size_t) S);
         for (int sq = 0; sq < S; sq++) {
             for (int skv = 0; skv < S; skv++) {
-                float v = (attention_mask[(size_t) sq * (size_t) S + (size_t) skv] != 0) ? 1.0f : 0.0f;
+                float v = (attention_mask[(size_t) sq * (size_t) S + (size_t) skv] != 0) ? 0.0f : -INFINITY;
                 attn_f16[(size_t) sq * (size_t) S + (size_t) skv] = ggml_fp32_to_fp16(v);
             }
         }
@@ -345,16 +345,16 @@ void pipeline_tts_llm_batched_ctx_init(MaskgitBatchedCtx * ctx,
         ctx->positions[i] = i;
     }
 
-    // The mask only takes two values (1.0 and 0.0). Pre-convert them once
+    // The mask only takes two values (0.0 and -inf). Pre-convert them once
     // instead of calling ggml_fp32_to_fp16 in the inner loop, which dominates
     // the CPU pre-compute on large S.
     if (ctx->has_attn_mask) {
-        const uint16_t f16_one  = ggml_fp32_to_fp16(1.0f);
-        const uint16_t f16_zero = ggml_fp32_to_fp16(0.0f);
-        const size_t   n        = (size_t) B_prime * (size_t) S * (size_t) S;
+        const uint16_t f16_allow = ggml_fp32_to_fp16(0.0f);
+        const uint16_t f16_block = ggml_fp32_to_fp16(-INFINITY);
+        const size_t   n         = (size_t) B_prime * (size_t) S * (size_t) S;
         ctx->attn_f16.resize(n);
         for (size_t i = 0; i < n; i++) {
-            ctx->attn_f16[i] = (attention_mask[i] != 0) ? f16_one : f16_zero;
+            ctx->attn_f16[i] = (attention_mask[i] != 0) ? f16_allow : f16_block;
         }
     } else {
         ctx->attn_f16.clear();
