@@ -317,17 +317,17 @@ static struct ggml_tensor * dac_snake(struct ggml_context * ctx, struct ggml_ten
 
 // Conv1d: x [T_in, IC] -> [T_out, OC] with bias
 static struct ggml_tensor * dac_conv1d(struct ggml_context * ctx,
-                                       struct ggml_tensor *  w,  // bf16 [K, IC, OC]
-                                       struct ggml_tensor *  b,  // f32  [OC] or NULL
+                                       struct ggml_tensor *  w,  // f16 [K, IC, OC]
+                                       struct ggml_tensor *  b,  // f32 [OC] or NULL
                                        struct ggml_tensor *  x,  // [T_in, IC]
                                        int                   stride,
                                        int                   pad,
                                        int                   dilation) {
-    // ggml_conv_1d expects 3D input [T, IC, N], so we add the batch dim.
-    struct ggml_tensor * x3 = ggml_reshape_3d(ctx, x, x->ne[0], x->ne[1], 1);
-    struct ggml_tensor * y  = ggml_conv_1d(ctx, w, x3, stride, pad, dilation);
-    // ggml_conv_1d returns [OL, OC, N=1], squeeze to 2D
-    y                       = ggml_reshape_2d(ctx, y, y->ne[0], y->ne[1]);
+    // implicit GEMM conv of a one row image, the patches only expand in shared memory: [T_in, IC] -> [T_out, OC]
+    struct ggml_tensor * y =
+        ggml_conv_2d_direct(ctx, ggml_reshape_4d(ctx, w, w->ne[0], 1, w->ne[1], w->ne[2]),
+                            ggml_reshape_4d(ctx, x, x->ne[0], 1, x->ne[1], 1), stride, 1, pad, 0, dilation, 1);
+    y = ggml_reshape_2d(ctx, y, y->ne[0], y->ne[2]);
     if (b) {
         struct ggml_tensor * b2d = ggml_reshape_2d(ctx, b, 1, b->ne[0]);
         y                        = ggml_add(ctx, y, b2d);

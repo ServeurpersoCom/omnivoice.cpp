@@ -265,7 +265,7 @@ std::vector<float> pipeline_codec_decode(PipelineCodec * pc,
         ggml_set_output(fc2_out);
     }
 
-    // DAC expects [T, IC=256] T fast (ggml_conv_1d input layout). Current shape
+    // DAC expects [T, IC=256] T fast. Current shape
     // is (256, T) so transpose and make contiguous before feeding the decoder.
     h = ggml_cont(gctx, ggml_transpose(gctx, h));
 
