@@ -46,6 +46,10 @@ struct tts_request {
     // random seed per request, matching the CLI convention; anything
     // else forwards verbatim for reproducible output.
     int64_t seed;
+
+    // Optional MaskGIT step count. Absent keeps the library default
+    // (32), anything else must be positive, matching the CLI --steps.
+    int steps;
 };
 
 // One voice registration parsed from the POST /v1/audio/voices JSON body.
@@ -173,6 +177,14 @@ static bool tts_parse_request(const std::string & body, tts_request & req, std::
         return false;
     }
     req.seed = seed ? yyjson_get_sint(seed) : -1;
+
+    yyjson_val * steps = yyjson_obj_get(root, "steps");
+    if (steps && (!yyjson_is_int(steps) || yyjson_get_sint(steps) < 1)) {
+        err = "'steps' must be a positive integer";
+        yyjson_doc_free(doc);
+        return false;
+    }
+    req.steps = steps ? (int) yyjson_get_sint(steps) : 0;
 
     yyjson_doc_free(doc);
 
